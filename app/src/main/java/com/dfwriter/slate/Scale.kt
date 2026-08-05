@@ -37,12 +37,17 @@ object Scale {
         private set
 
     /**
-     * Assumed physical width of the short edge of an E Ink writing tablet, in
-     * inches. The Manta's 1920 px short edge over 6.4 in is exactly its stated
-     * 300 PPI. Anything in this class of device lands close enough that the
-     * floor it produces is sane, and the user scale covers the rest.
+     * Every Supernote writing tablet is a 300 PPI panel — the Manta at
+     * 1920x2560 and the Nomad at 1404x1872 both are — as is essentially every
+     * E Ink device of this kind. So when the panel is big enough to be one of
+     * them, 300 is the floor, regardless of screen size. Deriving the floor
+     * from an assumed diagonal instead would need a different constant per
+     * model and would quietly under-size the smaller ones.
      */
-    private const val SHORT_EDGE_INCHES = 6.4f
+    private const val CLASS_PPI = 300f
+
+    /** Below this the device is a phone, where the reported density is trusted. */
+    private const val TABLET_SHORT_EDGE_PX = 1200
 
     fun init(ctx: Context, prefs: Prefs) {
         val dm = DisplayMetrics()
@@ -66,8 +71,7 @@ object Scale {
             densityDpi in 100..700 -> densityDpi.toFloat()
             else -> 0f
         }
-        val impliedByPanel =
-            if (shortEdgePx > 0) shortEdgePx / SHORT_EDGE_INCHES else 0f
+        val impliedByPanel = if (shortEdgePx >= TABLET_SHORT_EDGE_PX) CLASS_PPI else 0f
         return maxOf(claimed, impliedByPanel).coerceIn(120f, 700f)
     }
 

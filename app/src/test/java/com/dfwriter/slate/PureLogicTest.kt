@@ -25,6 +25,20 @@ class PureLogicTest {
     }
 
     @Test
+    fun `nomad reporting a false low density is also corrected upward`() {
+        // The Nomad is the smaller 7.8 inch sibling: 1404x1872, also 300 PPI.
+        // A floor derived from an assumed screen width would under-size it.
+        assertEquals(300f, Scale.chooseDpi(160f, 160, 1404), 1f)
+        assertEquals(300f, Scale.chooseDpi(300f, 300, 1404), 1f)
+    }
+
+    @Test
+    fun `body text lands at a readable physical size on a lying nomad`() {
+        val px = 13.5f / 72f * Scale.chooseDpi(160f, 160, 1404)
+        assertTrue("expected readable body height, got $px px", px in 45f..70f)
+    }
+
+    @Test
     fun `nonsense metrics still yield a usable density`() {
         assertEquals(300f, Scale.chooseDpi(Float.NaN, 0, 1920), 1f)
         assertTrue(Scale.chooseDpi(0f, 0, 0) >= 120f)
