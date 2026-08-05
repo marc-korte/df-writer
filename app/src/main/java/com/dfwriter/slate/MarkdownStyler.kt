@@ -1,0 +1,425 @@
+package com.dfwriter.slate
+
+import android.text.Editable
+import android.text.Spannable
+import android.text.Spanned
+
+/**
+ * Turns the Markdown in the buffer into the thing you see, without ever changing
+ * the buffer. Syntax markers are collapsed to zero width when the caret is
+ * somewhere else and revealed in grey when the caret enters their line, which is
+ * the whole of Typora's "what you see is what you mean" trick.
+ *
+ * Everything here is line-oriented on purpose. A keystroke restyles the lines it
+ * touched and the two lines the caret moved between, so cost does not grow with
+ * document length on a 1.8 GHz RK3566.
+ */
+class MarkdownStyler(private val prefs: Prefs) {
+
+    data class Heading(val level: Int, val title: String, val offset: Int)
+
+    /** Body size in pixels; recomputed whenever scale or point size changes. */
+    var bodyPx: Float = 40f
+
+    /** Set by the PDF exporter, whose canvas is in points rather than panel pixels. */
+    var overrideBodyPx: Float? = null
+
+    /** Set by the exporter to conceal markers regardless of the live preference. */
+    var forceHideMarkers: Boolean? = null
+
+    private val headingRatio = floatArrayOf(1.80f, 1.50f, 1.28f, 1.14f, 1.02f, 0.96f)
+
+    private var hideEnabled = true
+
+    fun refreshMetrics() {
+        bodyPx = overrideBodyPx ?: Scale.pt(prefs.bodyPt)
+        hideEnabled = forceHideMarkers ?: (prefs.hideMarkers && !prefs.sourceMode)
+    }
+
+    // ---------------------------------------------------------------- entry
+
+    /** Restyle every line intersecting [from]..[to], plus the caret's line. */
+    fun restyleRange(text: Editable, from: Int, to: Int, caret: Int) {
+        refreshMetrics()
+        val len = text.length
+        if (len == 0) return
+
+        var s = lineStartOf(text, from.coerceIn(0, len))
+        var e = lineEndOf(text, to.coerceIn(0, len))
+        if (caret in 0..len) {
+            s = minOf(s, lineStartOf(text, caret))
+            e = maxOf(e, lineEndOf(text, caret))
+        }
+        // A fence delimiter anywhere in the touched range flips the meaning of
+        // every following line, so widen to the end of the document.
+        if (rangeTouchesFence(text, s, e)) e = len
+
+        clearSlateSpans(text, s, e)
+        var inFence = fenceStateAt(text, s)
+        var i = s
+        while (i <= e && i <= len) {
+            val ls = i
+            val le = lineEndOf(text, ls)
+            inFence = styleLine(text, ls, le, caret, inFence)
+            if (le >= len) break
+            i = le + 1
+        }
+    }
+
+    fun restyleAll(text: Editable, caret: Int) = restyleRange(text, 0, text.length, caret)
+
+    /**
+     * Focus mode dims everything outside the caret's paragraph. Kept separate
+     * from [restyleRange] because it changes on caret movement alone, and
+     * because its colour must be applied last to win over marker colours.
+     */
+    fun applyFocus(text: Editable, caret: Int) {
+        for (sp in text.getSpans(0, text.length, FocusSpan::class.java)) text.removeSpan(sp)
+        if (!prefs.focusMode) return
+        val len = text.length
+        if (len == 0) return
+        val c = caret.coerceIn(0, len)
+        val ps = paragraphStart(text, c)
+        val pe = paragraphEnd(text, c)
+        if (ps > 0) text.setSpan(DimTextSpan(), 0, ps, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        if (pe < len) text.setSpan(DimTextSpan(), pe, len, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+    }
+
+    fun clearAll(text: Spannable) = clearSlateSpans(text, 0, text.length)
+
+    // ---------------------------------------------------------------- lines
+
+    /** Styles one line; returns the fenced-code state for the following line. */
+    private fun styleLine(
+        text: Editable, ls: Int, le: Int, caret: Int, inFence: Boolean
+    ): Boolean {
+        val line = text.subSequence(ls, le).toString()
+        val caretHere = caret in ls..le
+        val reveal = !hideEnabled || caretHere
+
+        // --- fenced code ------------------------------------------------
+        val fence = FENCE.matchEntire(line.trimEnd())
+        if (fence != null) {
+            paint(text, ls, le, CodeBlockSpan(0, ruleWidth()))
+            markerRun(text, ls, le, reveal)
+            return !inFence
+        }
+        if (inFence) {
+            paint(text, ls, le, CodeBlockSpan(0, ruleWidth()))
+            if (le > ls) text.setSpan(MonoSpan(), ls, le, EX)
+            return true
+        }
+
+        // --- horizontal rule --------------------------------------------
+        if (HR.matches(line) && line.isNotEmpty()) {
+            paint(text, ls, le, RuleSpan(ruleWidth()))
+            markerRun(text, ls, le, reveal)
+            return false
+        }
+
+        var content = ls
+
+        // --- blockquote --------------------------------------------------
+        val quote = QUOTE.find(line)
+        if (quote != null) {
+            val depth = quote.value.count { it == '>' }
+            val step = Math.round(bodyPx * 1.1f)
+            paragraphSpan(
+                text, ls, le,
+                QuoteSpan(step * depth, ruleWidth(), Math.round(bodyPx * 0.25f))
+            )
+            content = ls + quote.value.length
+            markerRun(text, ls, content, reveal)
+            if (content < le) text.setSpan(MarkerSpan(0xFF3C3C3C.toInt()), content, le, EX)
+        }
+
+        val head = text.subSequence(content, le).toString()
+
+        // --- heading -------------------------------------------------------
+        val heading = HEADING.find(head)
+        if (heading != null) {
+            val level = heading.groupValues[1].length
+            val px = Math.round(bodyPx * headingRatio[level - 1])
+            val markEnd = content + heading.value.length
+            text.setSpan(SizeSpan(px), content, le, EX)
+            text.setSpan(WeightSpan(android.graphics.Typeface.BOLD), content, le, EX)
+            paragraphSpan(text, ls, le, SpaceAboveSpan(Math.round(bodyPx * 0.55f)))
+            markerRun(text, content, markEnd, reveal)
+            styleInline(text, markEnd, le, reveal)
+            return false
+        }
+
+        // --- lists ---------------------------------------------------------
+        val list = LIST.find(head)
+        if (list != null) {
+            val indentChars = list.groupValues[1].length
+            val markerStart = content + indentChars
+            var markEnd = content + list.value.length
+            val step = Math.round(bodyPx * 1.6f)
+            val depth = indentChars / 2
+            paragraphSpan(
+                text, ls, le,
+                HangingIndentSpan(step * depth, step * (depth + 1))
+            )
+
+            val task = TASK.find(text.subSequence(markEnd, le).toString())
+            val ordered = list.groupValues[2].firstOrNull()?.isDigit() == true
+
+            if (reveal) {
+                text.setSpan(MarkerSpan(), markerStart, markEnd, EX)
+            } else if (ordered) {
+                // Keep the number, quieten the delimiter and the trailing space.
+                text.setSpan(MarkerSpan(), markerStart + list.groupValues[2].length - 1, markEnd, EX)
+            } else {
+                text.setSpan(GlyphSpan(bulletFor(depth)), markerStart, markEnd, EX)
+                if (markerStart > content) text.setSpan(HiddenSpan(), content, markerStart, EX)
+            }
+
+            if (task != null) {
+                val ts = markEnd
+                val te = markEnd + task.value.length
+                val done = task.groupValues[1].lowercase() == "x"
+                if (reveal) {
+                    text.setSpan(MarkerSpan(), ts, te, EX)
+                } else {
+                    text.setSpan(GlyphSpan(if (done) "☑" else "☐", 1.7f), ts, te, EX)
+                }
+                if (done && te < le) text.setSpan(StrikeSpan(), te, le, EX)
+                markEnd = te
+            }
+            styleInline(text, markEnd, le, reveal)
+            return false
+        }
+
+        styleInline(text, content, le, reveal)
+        return false
+    }
+
+    // --------------------------------------------------------------- inline
+
+    private fun styleInline(text: Editable, from: Int, to: Int, reveal: Boolean) {
+        if (to <= from) return
+        val s = text.subSequence(from, to).toString()
+        val claimed = BooleanArray(s.length)
+
+        // Code first: nothing inside a code span is Markdown.
+        apply(from, s, claimed, CODE) { st, en, m ->
+            val ticks = m.groupValues[1].length
+            text.setSpan(InlineCodeSpan(), st, en, EX)
+            markerRun(text, st, st + ticks, reveal)
+            markerRun(text, en - ticks, en, reveal)
+        }
+        apply(from, s, claimed, IMAGE) { st, en, m ->
+            val altLen = m.groupValues[1].length
+            text.setSpan(LinkTextSpan(), st + 2, st + 2 + altLen, EX)
+            markerRun(text, st, st + 2, reveal)
+            markerRun(text, st + 2 + altLen, en, reveal)
+        }
+        apply(from, s, claimed, LINK) { st, en, m ->
+            val textLen = m.groupValues[1].length
+            text.setSpan(LinkTextSpan(), st + 1, st + 1 + textLen, EX)
+            markerRun(text, st, st + 1, reveal)
+            markerRun(text, st + 1 + textLen, en, reveal)
+        }
+        apply(from, s, claimed, BOLD_ITALIC) { st, en, _ ->
+            text.setSpan(WeightSpan(android.graphics.Typeface.BOLD_ITALIC), st, en, EX)
+            markerRun(text, st, st + 3, reveal); markerRun(text, en - 3, en, reveal)
+        }
+        apply(from, s, claimed, BOLD) { st, en, _ ->
+            text.setSpan(WeightSpan(android.graphics.Typeface.BOLD), st, en, EX)
+            markerRun(text, st, st + 2, reveal); markerRun(text, en - 2, en, reveal)
+        }
+        apply(from, s, claimed, STRIKE) { st, en, _ ->
+            text.setSpan(StrikeSpan(), st, en, EX)
+            markerRun(text, st, st + 2, reveal); markerRun(text, en - 2, en, reveal)
+        }
+        apply(from, s, claimed, ITALIC) { st, en, _ ->
+            text.setSpan(WeightSpan(android.graphics.Typeface.ITALIC), st, en, EX)
+            markerRun(text, st, st + 1, reveal); markerRun(text, en - 1, en, reveal)
+        }
+        apply(from, s, claimed, HIGHLIGHT) { st, en, _ ->
+            text.setSpan(InlineCodeSpan(), st, en, EX)
+            markerRun(text, st, st + 2, reveal); markerRun(text, en - 2, en, reveal)
+        }
+    }
+
+    /**
+     * Runs one inline rule over a line, skipping any character an earlier rule
+     * has already claimed. Rule order therefore encodes precedence: code spans
+     * run first, so nothing inside them is ever read as Markdown.
+     */
+    private inline fun apply(
+        base: Int, line: String, claimed: BooleanArray, re: Regex,
+        body: (start: Int, end: Int, m: MatchResult) -> Unit
+    ) {
+        for (m in re.findAll(line)) {
+            val r = m.range
+            if ((r.first..r.last).any { claimed[it] }) continue
+            for (i in r) claimed[i] = true
+            body(base + r.first, base + r.last + 1, m)
+        }
+    }
+
+    /** Either collapse a marker run or paint it grey, depending on the caret. */
+    private fun markerRun(text: Editable, start: Int, end: Int, reveal: Boolean) {
+        if (end <= start) return
+        text.setSpan(if (reveal) MarkerSpan() else HiddenSpan(), start, end, EX)
+    }
+
+    // --------------------------------------------------------------- outline
+
+    // ----------------------------------------------------------------- util
+
+    // Derived from the body size, not from the panel, so the PDF exporter gets
+    // proportional rules on its own points-based canvas.
+    private fun ruleWidth(): Int = maxOf(1, Math.round(bodyPx * 0.085f))
+
+    private fun bulletFor(depth: Int): String = when (depth % 3) {
+        0 -> "•"
+        1 -> "◦"
+        else -> "▪"
+    }
+
+    private fun paint(text: Editable, ls: Int, le: Int, span: Any) {
+        text.setSpan(span, ls, maxOf(le, ls + 1).coerceAtMost(text.length), EX)
+    }
+
+    private fun paragraphSpan(text: Editable, ls: Int, le: Int, span: Any) {
+        val end = (le + 1).coerceAtMost(text.length)
+        if (end > ls) text.setSpan(span, ls, end, EX)
+    }
+
+    private fun clearSlateSpans(text: Spannable, from: Int, to: Int) {
+        for (sp in text.getSpans(from, to, SlateSpan::class.java)) {
+            if (sp is FocusSpan) continue
+            text.removeSpan(sp)
+        }
+    }
+
+    private fun rangeTouchesFence(text: CharSequence, from: Int, to: Int): Boolean {
+        var i = from
+        while (i < to && i < text.length) {
+            if (text[i] == '`' && i + 2 < text.length &&
+                text[i + 1] == '`' && text[i + 2] == '`'
+            ) return true
+            i++
+        }
+        return false
+    }
+
+    /**
+     * Counts fence delimiters before [offset] without allocating a string per
+     * line — this runs on every keystroke, so it walks the characters directly.
+     */
+    private fun fenceStateAt(text: CharSequence, offset: Int): Boolean {
+        var count = 0
+        var i = 0
+        while (i < offset) {
+            var e = i
+            while (e < offset && text[e] != '\n') e++
+            if (isFenceLine(text, i, e)) count++
+            i = e + 1
+        }
+        return count % 2 == 1
+    }
+
+    private fun isFenceLine(text: CharSequence, start: Int, end: Int): Boolean {
+        var i = start
+        var lead = 0
+        while (i < end && text[i] == ' ' && lead < 4) { i++; lead++ }
+        if (lead > 3 || i >= end) return false
+        val ch = text[i]
+        if (ch != '`' && ch != '~') return false
+        var run = 0
+        while (i < end && text[i] == ch) { i++; run++ }
+        if (run < 3) return false
+        // Only an info string may follow, and it may not contain the fence char.
+        while (i < end) {
+            val c = text[i]
+            if (c == ch) return false
+            i++
+        }
+        return true
+    }
+
+    companion object {
+        private const val EX = Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+
+        private val FENCE = Regex("^\\s{0,3}(`{3,}|~{3,})\\s*[A-Za-z0-9+#._-]*$")
+        private val HR = Regex("^\\s{0,3}([-*_])\\s*(\\1\\s*){2,}$")
+        private val QUOTE = Regex("^\\s{0,3}(>\\s?)+")
+        private val HEADING = Regex("^(#{1,6})\\s+")
+        private val LIST = Regex("^([ \\t]*)([-*+]|\\d{1,9}[.)])[ \\t]+")
+        private val TASK = Regex("^\\[([ xX])\\][ \\t]+")
+
+        private val CODE = Regex("(`+)(?!`)([^`]|[^`][\\s\\S]*?[^`])\\1(?!`)")
+        private val IMAGE = Regex("!\\[([^\\]\\n]*)\\]\\(([^)\\n]*)\\)")
+        private val LINK = Regex("\\[([^\\]\\n]*)\\]\\(([^)\\n]*)\\)")
+        private val BOLD_ITALIC = Regex("\\*{3}(?!\\s)([^*\\n]+?)(?<!\\s)\\*{3}")
+        private val BOLD = Regex("(?:\\*{2}(?!\\s)([^*\\n]+?)(?<!\\s)\\*{2})|(?:_{2}(?!\\s)([^_\\n]+?)(?<!\\s)_{2})")
+        private val ITALIC = Regex("(?:\\*(?!\\s)([^*\\n]+?)(?<!\\s)\\*)|(?:(?<![A-Za-z0-9_])_(?!\\s)([^_\\n]+?)(?<!\\s)_(?![A-Za-z0-9_]))")
+        private val STRIKE = Regex("~{2}(?!\\s)([^~\\n]+?)(?<!\\s)~{2}")
+        private val HIGHLIGHT = Regex("={2}(?!\\s)([^=\\n]+?)(?<!\\s)={2}")
+
+        /** Headings in document order, skipping anything inside a code fence. */
+        fun outline(text: CharSequence): List<Heading> {
+            val out = ArrayList<Heading>()
+            var i = 0
+            var inFence = false
+            val len = text.length
+            while (i < len) {
+                var e = i
+                while (e < len && text[e] != '\n') e++
+                val line = text.subSequence(i, e).toString()
+                if (FENCE.matchEntire(line.trimEnd()) != null) {
+                    inFence = !inFence
+                } else if (!inFence) {
+                    val m = HEADING.find(line)
+                    if (m != null) {
+                        out.add(
+                            Heading(
+                                m.groupValues[1].length,
+                                line.substring(m.value.length).trim().ifEmpty { "—" },
+                                i
+                            )
+                        )
+                    }
+                }
+                i = e + 1
+            }
+            return out
+        }
+
+        fun lineStartOf(t: CharSequence, at: Int): Int {
+            var i = at.coerceIn(0, t.length)
+            while (i > 0 && t[i - 1] != '\n') i--
+            return i
+        }
+
+        fun lineEndOf(t: CharSequence, at: Int): Int {
+            var i = at.coerceIn(0, t.length)
+            while (i < t.length && t[i] != '\n') i++
+            return i
+        }
+
+        fun paragraphStart(t: CharSequence, at: Int): Int {
+            var i = lineStartOf(t, at)
+            while (i > 0) {
+                val prevStart = lineStartOf(t, i - 1)
+                if (t.subSequence(prevStart, i - 1).isBlank()) break
+                i = prevStart
+            }
+            return i
+        }
+
+        fun paragraphEnd(t: CharSequence, at: Int): Int {
+            var i = lineEndOf(t, at)
+            while (i < t.length) {
+                val nextEnd = lineEndOf(t, i + 1)
+                if (t.subSequence(i + 1, nextEnd).isBlank()) break
+                i = nextEnd
+            }
+            return i
+        }
+    }
+}

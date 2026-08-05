@@ -1,2 +1,192 @@
-# df-writer
-Distraction Free Writing app for Supernote Manta
+# Slate
+
+A distraction-free Markdown writer for the Supernote Manta, built for a
+Bluetooth keyboard and a device turned sideways in its folio.
+
+It follows Typora's model: there is no preview pane and no split screen. You
+type Markdown and it formats itself in place. The syntax markers vanish once the
+caret leaves their line and reappear in grey when you move back onto it, so the
+page reads like finished prose while you are still writing it.
+
+**Download:** the signed APK is attached to the
+[latest release](https://github.com/marc-korte/df-writer/releases/latest)
+(684 KB). You can open that page in the Manta's own browser and download it
+straight to the device.
+
+---
+
+## Why this one is not tiny on the Manta
+
+Most sideloaded apps come out half-size on E Ink tablets, which is the usual
+reason they are unusable. The cause is that Android sizes everything in `dp`,
+which is derived from `densityDpi` — a number the ROM *reports*. E Ink ROMs
+routinely report something unrelated to the actual glass. The Manta is a 300 PPI
+panel; if Chauvet claims 160, then every `16dp` control is drawn 16 pixels tall,
+about half the size its designer intended.
+
+Slate never uses `dp`. Every dimension in the app — text, padding, panels,
+buttons, rules — is a physical measurement in points or millimetres, converted
+through a density derived from two independent signals, of which the larger
+wins:
+
+- what the display metrics claim, when the claim is plausible at all;
+- what the panel's own pixel count implies, which no ROM can misreport.
+
+Because it takes the larger, a lying density can only ever be corrected upward.
+The worst case is text slightly too big, never text you cannot read. On a Manta
+reporting a false 160 dpi, Slate still sizes everything for 300.
+
+On top of that, **Ctrl =** and **Ctrl -** scale the entire interface, text and
+panels together, and the setting is remembered. If it is still not right for
+your eyes, two keystrokes fix it permanently.
+
+## Other things done for E Ink specifically
+
+- **No blinking caret.** The framework caret blinks twice a second, which on
+  E Ink is a partial screen refresh twice a second, forever. Slate paints its
+  own steady caret instead.
+- **No animations, no ripples, no shadows.** All switched off in the theme
+  rather than fought at runtime.
+- **Pure black on pure white.** Greys are used only where they survive
+  dithering.
+- **Ctrl R flashes the panel** black and back, which is the only reliable way to
+  make an E Ink controller do a full update and clear accumulated ghosting.
+  There is also an automatic flash after a configurable number of edits, when
+  you pause typing.
+- **Landscape by default**, since the folio-as-stand position is the point.
+  Cycle with **Ctrl Shift R** — E Ink tablets usually have no accelerometer, so
+  this is an explicit setting rather than auto-rotate.
+- **Zero third-party dependencies.** No AndroidX, no Compose, no Play Services.
+  Framework views start faster and repaint more predictably, and the APK is
+  683 KB.
+
+---
+
+## Installing it on the Manta
+
+**1. Turn on sideloading**
+
+On the Manta: `Settings → Security & Privacy → Sideload`, and switch it on.
+
+**2. Get the APK onto the device**
+
+Open the [latest release](https://github.com/marc-korte/df-writer/releases/latest)
+in the Manta's browser and download `Slate.apk`, or connect by USB and copy it
+into any folder on the device.
+
+**3. Install**
+
+Open the Manta's file manager, tap the APK, confirm.
+
+Alternatively, over USB with debugging enabled:
+
+```sh
+adb install -r app/build/outputs/apk/release/app-release.apk
+```
+
+**4. First run**
+
+Grant storage access when asked. Slate opens a welcome document that lists every
+shortcut; delete it and start writing. Documents are ordinary `.md` files in
+`/sdcard/Documents/Slate`, so the Manta's own file browser and a USB cable can
+both reach them.
+
+> Released APKs are signed with a self-signed key that is **not** in this
+> repository, so that rebuilds install over the top of an existing copy. See
+> `keystore.properties.example` to set up your own. Without one the build falls
+> back to the debug key, which is fine for a first install but will not install
+> over a copy signed with a different key.
+
+---
+
+## Keys
+
+Everything is on the keyboard, because tapping a slow panel accurately is worse
+than typing on the keyboard already in your hands. **Ctrl P** opens a command
+palette listing every command with its shortcut, so none of this needs
+memorising.
+
+| | |
+|---|---|
+| **Ctrl P** | command palette |
+| **Ctrl N / Ctrl O / Ctrl S** | new, open, save |
+| **Ctrl Z / Ctrl Shift Z** | undo, redo |
+| **Ctrl F / Ctrl H / Ctrl G** | find, replace, find next |
+| **Ctrl Shift O** | outline, jump to any heading |
+| **Ctrl ,** | settings |
+| **Ctrl = / Ctrl -** | interface bigger, smaller |
+| **Ctrl B / Ctrl I / Ctrl E** | bold, italic, inline code |
+| **Ctrl K** | link |
+| **Ctrl 1**…**Ctrl 6**, **Ctrl 0** | heading levels, back to paragraph |
+| **Ctrl Shift L / N / T** | bullet, numbered, task list |
+| **Ctrl Shift Q / K / H / B** | blockquote, code block, rule, table |
+| **Enter** in a list | next item; on an empty item, ends the list |
+| **Tab / Shift Tab** | indent, outdent |
+| **F8** | focus mode — dim every paragraph but this one |
+| **F9** | typewriter mode — hold the caret at mid-screen |
+| **Ctrl /** | show the raw Markdown |
+| **Ctrl R** | flash the panel to clear ghosting |
+| **Ctrl W** | word count and reading time |
+| **Ctrl Shift M / Ctrl Shift P** | export HTML, export PDF |
+| **Esc** | close any panel |
+
+## What it supports
+
+Headings, bold, italic, bold-italic, strikethrough, highlight, inline code,
+fenced code blocks with language tags, blockquotes, nested bullet and numbered
+lists, task lists with real checkboxes, links, images, horizontal rules and
+pipe tables.
+
+Files autosave every few seconds and again whenever the app is backgrounded,
+written via a temporary file and a rename so a crash mid-write cannot truncate a
+draft. A shadow copy is also kept in the app's private storage.
+
+Export produces a self-contained styled HTML file, or a paginated A4 PDF
+rendered directly from the same engine that draws the screen. Both land in an
+`Exports` folder beside your documents.
+
+---
+
+## Building from source
+
+Requires a JDK (17 or newer) and the Android SDK. Create `local.properties` with
+`sdk.dir=/path/to/Android/Sdk`.
+
+```sh
+./gradlew :app:assembleRelease          # build the APK
+./gradlew :app:testReleaseUnitTest      # run the test suite
+```
+
+The build works with no further setup and signs with the debug key. To sign with
+your own key instead, copy `keystore.properties.example` to
+`keystore.properties` and fill it in; both it and `keystore/` are gitignored.
+
+### Tests
+
+77 tests, all passing. They cover the parts that would otherwise fail silently:
+
+- **`PureLogicTest`** — the density decision against a truthful Manta, a Manta
+  reporting a false 160 dpi, garbage metrics and an ordinary high-density phone;
+  the HTML renderer; outline extraction; word counting; file naming.
+- **`StylerTest`** (Robolectric, real Android text buffers) — that markers hide
+  and reveal correctly around the caret, that emphasis is applied while the
+  buffer itself is never modified, that code fences suppress Markdown inside
+  them, that focus mode dims the right paragraphs, and that styling every caret
+  position in a document containing every construct never throws. It also
+  asserts that incremental restyling while typing converges on the same result
+  as a full restyle, and that a single edit in a 300-section document restyles
+  in under 60 ms.
+- **`EditorTest`** — wrapping and unwrapping, heading levels, list prefixes,
+  Enter continuing and ending lists, Tab indentation, and the undo history
+  including coalescing, redo, and discarding an abandoned redo branch.
+- **`ShortcutTest`** — the real activity driven by real key events, because a
+  chord mapped to a command name that no longer exists still compiles and then
+  silently does nothing. Every formatting chord, undo and redo, each panel
+  opening and closing on Escape, the mode toggles, and that a scale change
+  preserves the document and the caret through the view rebuild.
+- **`ActivityStartupTest`** — that the app actually starts and survives a full
+  lifecycle round trip.
+
+The emulator in this environment segfaults on launch, so the app has not been
+run on a live screen; the Robolectric suite covers startup and the text engine
+in its place.

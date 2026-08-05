@@ -1,0 +1,12 @@
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+
+# Signing material never goes in the repository. See keystore.properties.example
+keystore/
+keystore.properties
+
+# Built artefacts are published as GitHub releases, not committed
+*.apk

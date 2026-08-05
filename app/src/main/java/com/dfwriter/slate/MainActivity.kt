@@ -1,0 +1,935 @@
+package com.dfwriter.slate
+
+import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
+import java.io.File
+import kotlin.math.max
+import kotlin.math.min
+
+class MainActivity : Activity() {
+
+    private lateinit var prefs: Prefs
+    private lateinit var styler: MarkdownStyler
+    private lateinit var store: DocStore
+
+    private lateinit var root: FrameLayout
+    private lateinit var editor: MarkdownEditor
+    private lateinit var statusBar: LinearLayout
+    private lateinit var statusLeft: TextView
+    private lateinit var statusRight: TextView
+    private lateinit var sheet: ListSheet
+    private lateinit var settings: SettingsSheet
+    private lateinit var findBar: FindBar
+
+    private val ui = Handler(Looper.getMainLooper())
+    private var browseDir: File? = null
+    private var editsSinceRefresh = 0
+    private var lastFindIndex = -1
+    private var statusMessage: String? = null
+
+    private val autosave = object : Runnable {
+        override fun run() {
+            if (store.dirty) saveQuietly()
+            ui.postDelayed(this, 4000)
+        }
+    }
+
+    private val idleRefresh = Runnable {
+        if (prefs.autoRefreshEdits > 0 && editsSinceRefresh >= prefs.autoRefreshEdits) {
+            flashRefresh()
+        }
+    }
+
+    // ------------------------------------------------------------ lifecycle
+
+    override fun onCreate(saved: Bundle?) {
+        super.onCreate(saved)
+        prefs = Prefs(this)
+        Scale.init(this, prefs)
+        styler = MarkdownStyler(prefs)
+        store = DocStore(this, prefs)
+
+        window.setBackgroundDrawable(ColorDrawable(Color.WHITE))
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        applyOrientation()
+        buildUi()
+        applyChrome()
+
+        setContentView(root)
+
+        requestStorageIfNeeded()
+        restoreDocument()
+        ui.postDelayed(autosave, 4000)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        intent?.let { openFromIntent(it) }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (store.dirty) saveQuietly()
+        store.writeScratch(editor.text.toString())
+        prefs.lastCaret = editor.selectionStart
+    }
+
+    override fun onDestroy() {
+        ui.removeCallbacksAndMessages(null)
+        super.onDestroy()
+    }
+
+    // ----------------------------------------------------------------- view
+
+    private fun buildUi() {
+        root = FrameLayout(this).apply { setBackgroundColor(Color.WHITE) }
+
+        val main = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+        }
+
+        findBar = FindBar(this, prefs).apply { visibility = View.GONE }
+        main.addView(
+            findBar,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        editor = MarkdownEditor(this)
+        editor.bind(prefs, styler)
+        main.addView(
+            editor,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        )
+
+        statusBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(Scale.mmInt(5f), Scale.mmInt(1.4f), Scale.mmInt(5f), Scale.mmInt(1.8f))
+        }
+        statusLeft = Ui.text(this, prefs.bodyPt * 0.76f, color = Ink.RULE)
+        statusRight = Ui.text(this, prefs.bodyPt * 0.76f, color = Ink.RULE)
+        statusRight.gravity = Gravity.END
+        statusBar.addView(
+            statusLeft, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        statusBar.addView(
+            statusRight, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        main.addView(Ui.divider(this, 0xFFE0E0E0.toInt()))
+        main.addView(statusBar)
+
+        root.addView(
+            main,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        sheet = ListSheet(this, prefs).apply { visibility = View.GONE }
+        settings = SettingsSheet(this, prefs).apply { visibility = View.GONE }
+        root.addView(sheet, sheetParams())
+        root.addView(settings, sheetParams())
+
+        wireCallbacks()
+        updateStatus()
+    }
+
+    private fun sheetParams(): FrameLayout.LayoutParams {
+        val lp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        val side = Scale.mmInt(14f)
+        val vert = Scale.mmInt(10f)
+        lp.setMargins(side, vert, side, vert)
+        return lp
+    }
+
+    private fun wireCallbacks() {
+        editor.onEdit = {
+            store.dirty = true
+            editsSinceRefresh++
+            updateStatus()
+            ui.removeCallbacks(idleRefresh)
+            ui.postDelayed(idleRefresh, 1400)
+        }
+        editor.onCaretMoved = { updateStatus() }
+
+        sheet.onDismiss = { closeSheets() }
+        settings.onDismiss = { closeSheets() }
+        settings.onChanged = {
+            Scale.init(this, prefs)
+            editor.applyMetrics()
+            applyOrientation()
+            applyChrome()
+            updateStatus()
+        }
+
+        findBar.onDismiss = { findBar.hide(); editor.requestFocus() }
+        findBar.onFind = { q, fwd -> findNext(q, fwd) }
+        findBar.onReplaceOne = { q, r -> replaceOne(q, r) }
+        findBar.onReplaceAll = { q, r -> replaceAll(q, r) }
+    }
+
+    private fun applyChrome() {
+        statusBar.visibility = if (prefs.showStatusBar) View.VISIBLE else View.GONE
+        @Suppress("DEPRECATION")
+        root.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                )
+    }
+
+    private fun applyOrientation() {
+        requestedOrientation = when (prefs.orientation) {
+            Orientation.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            Orientation.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            Orientation.AUTO -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+
+    // ------------------------------------------------------------- document
+
+    private fun requestStorageIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val need = arrayOf(
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE
+        ).filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 1)
+    }
+
+    override fun onRequestPermissionsResult(
+        code: Int, permissions: Array<out String>, results: IntArray
+    ) {
+        super.onRequestPermissionsResult(code, permissions, results)
+        // The library root is chosen lazily, so a late grant just widens where
+        // documents can live; nothing needs re-opening.
+        updateStatus()
+    }
+
+    private fun restoreDocument() {
+        intent?.let { if (openFromIntent(it)) return }
+
+        val last = prefs.lastFile
+        if (last.isNotEmpty()) {
+            val f = File(last)
+            if (f.isFile && f.canRead()) {
+                loadInto(f)
+                editor.setSelection(prefs.lastCaret.coerceIn(0, editor.text.length))
+                return
+            }
+        }
+        val welcome = File(store.libraryRoot(), "Welcome to Slate.md")
+        if (!welcome.exists()) {
+            runCatching { welcome.writeText(WELCOME, Charsets.UTF_8) }
+        }
+        if (welcome.exists()) loadInto(welcome) else newDocument()
+    }
+
+    private fun openFromIntent(i: Intent): Boolean {
+        val uri: Uri = i.data ?: return false
+        val f = when (uri.scheme) {
+            "file" -> uri.path?.let(::File)
+            else -> null
+        }
+        if (f != null && f.isFile) {
+            loadInto(f); return true
+        }
+        // Content URIs cannot be written back in place, so the text is copied
+        // into the library and edited there rather than silently going nowhere.
+        return runCatching {
+            val body = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                ?: return false
+            val name = uri.lastPathSegment?.substringAfterLast('/') ?: "imported.md"
+            val dest = File(store.libraryRoot(), DocStore.ensureExt(name))
+            dest.writeText(body, Charsets.UTF_8)
+            loadInto(dest)
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun loadInto(f: File) {
+        val body = runCatching { store.open(f) }.getOrElse {
+            flash("Could not read ${f.name}")
+            return
+        }
+        editor.setText(body)
+        editor.restyleNow()
+        editor.setSelection(0)
+        editor.requestFocus()
+        editor.clearHistory()
+        editsSinceRefresh = 0
+        // setText runs the change listener, which flags the document dirty even
+        // though loading is not an edit. Clear it, or every open would rewrite
+        // the file on the next autosave tick.
+        store.dirty = false
+        updateStatus()
+    }
+
+    private fun newDocument() {
+        val f = store.createAndOpen(store.libraryRoot())
+        editor.setText("")
+        editor.restyleNow()
+        editor.requestFocus()
+        editor.clearHistory()
+        store.dirty = false
+        updateStatus()
+        flash(
+            if (f != null) "New document: ${f.name}"
+            else "Could not create a file — check storage permission"
+        )
+    }
+
+    private fun saveQuietly(): Boolean {
+        val body = editor.text.toString()
+        if (store.current == null && store.createAndOpen(store.libraryRoot(), firstHeading(body)) == null) {
+            // Nowhere to write, so keep the text safe in private storage and
+            // leave the document dirty rather than pretending it was saved.
+            store.writeScratch(body)
+            flash("Save failed — check storage permission")
+            return false
+        }
+        val f = store.save(body)
+        if (f == null) {
+            store.writeScratch(body)
+            flash("Save failed — check storage permission")
+            return false
+        }
+        updateStatus()
+        return true
+    }
+
+    private fun firstHeading(body: String): String? {
+        for (line in body.lineSequence()) {
+            val m = Regex("^#{1,6}\\s+(.*)$").find(line.trim())
+            if (m != null) return m.groupValues[1]
+            if (line.isNotBlank()) return line.trim().take(50)
+        }
+        return null
+    }
+
+    // --------------------------------------------------------------- panels
+
+    private fun closeSheets() {
+        sheet.hide()
+        settings.hide()
+        editor.requestFocus()
+    }
+
+    private fun sheetsOpen() =
+        sheet.visibility == View.VISIBLE || settings.visibility == View.VISIBLE
+
+    private fun showPalette() {
+        settings.hide()
+        val items = commands().map {
+            ListSheet.Item(title = it.title, keys = it.keys, payload = it)
+        }
+        sheet.configure("Commands", "Type a command…", items)
+        sheet.onPick = { item ->
+            closeSheets()
+            (item.payload as? Cmd)?.run?.invoke()
+        }
+        sheet.onFreeText = null
+        sheet.show()
+    }
+
+    private fun showFiles(dir: File = browseDir ?: store.libraryRoot()) {
+        settings.hide()
+        browseDir = dir
+        val items = ArrayList<ListSheet.Item>()
+        dir.parentFile?.let {
+            if (it.canRead()) items.add(ListSheet.Item("⌃ ${it.name.ifEmpty { "/" }}", "up", payload = it))
+        }
+        for (e in store.list(dir)) {
+            items.add(
+                if (e.isDir) ListSheet.Item("▸ ${e.file.name}", "folder", payload = e.file)
+                else ListSheet.Item(e.file.name, humanSize(e.file.length()), payload = e.file)
+            )
+        }
+        sheet.configure("Files · ${dir.absolutePath}", "Filter, or type a new name…", items)
+        sheet.onPick = { item ->
+            val f = item.payload as? File
+            when {
+                f == null -> Unit
+                f.isDirectory -> showFiles(f)
+                else -> { closeSheets(); openWithSave(f) }
+            }
+        }
+        sheet.onFreeText = { name ->
+            closeSheets()
+            val dir = browseDir ?: store.libraryRoot()
+            val existing = File(dir, DocStore.ensureExt(name))
+            if (existing.exists()) {
+                openWithSave(existing)
+            } else {
+                if (store.dirty) saveQuietly()
+                val made = store.createNamed(dir, name)
+                if (made != null) {
+                    loadInto(made)
+                    flash("Created ${made.name}")
+                } else {
+                    flash("Could not create $name here")
+                }
+            }
+        }
+        sheet.show()
+    }
+
+    private fun showOutline() {
+        settings.hide()
+        val heads = MarkdownStyler.outline(editor.text)
+        val items = heads.map {
+            ListSheet.Item(it.title, "H${it.level}", indent = it.level - 1, payload = it.offset)
+        }
+        sheet.configure("Outline", "Jump to a heading…", items)
+        sheet.onPick = { item ->
+            closeSheets()
+            (item.payload as? Int)?.let { off ->
+                editor.setSelection(off.coerceIn(0, editor.text.length))
+                editor.post { editor.centreCaret() }
+            }
+        }
+        sheet.onFreeText = null
+        sheet.show()
+    }
+
+    private fun showSettings() {
+        sheet.hide()
+        settings.setRows(settingRows())
+        settings.show()
+    }
+
+    private fun settingRows(): List<SettingsSheet.Row> = listOf(
+        SettingsSheet.Row(
+            "Interface scale",
+            { "${Math.round(Scale.ui * 100)}%" },
+            { d -> Scale.setUiScale(prefs, Scale.ui + d * Scale.UI_STEP) },
+            "everything, at once"
+        ),
+        SettingsSheet.Row(
+            "Text size",
+            { "${"%.1f".format(prefs.bodyPt)} pt" },
+            { d -> prefs.bodyPt = (prefs.bodyPt + d * 0.5f).coerceIn(7f, 30f) }
+        ),
+        SettingsSheet.Row(
+            "Line spacing",
+            { "%.2f".format(prefs.lineSpacing) },
+            { d -> prefs.lineSpacing = (prefs.lineSpacing + d * 0.05f).coerceIn(1.0f, 2.4f) }
+        ),
+        SettingsSheet.Row(
+            "Line length",
+            { if (prefs.measureChars <= 0) "full width" else "${prefs.measureChars} chars" },
+            { d -> prefs.measureChars = (prefs.measureChars + d * 4).coerceIn(0, 160) }
+        ),
+        SettingsSheet.Row(
+            "Typeface",
+            { prefs.typeface.name.lowercase() },
+            { d ->
+                val v = SerifChoice.values()
+                prefs.typeface = v[((prefs.typeface.ordinal + d) % v.size + v.size) % v.size]
+            }
+        ),
+        SettingsSheet.Row(
+            "Focus mode",
+            { onOff(prefs.focusMode) },
+            { prefs.focusMode = !prefs.focusMode; editor.restyleNow() },
+            "dim all but this paragraph"
+        ),
+        SettingsSheet.Row(
+            "Typewriter mode",
+            { onOff(prefs.typewriterMode) },
+            { prefs.typewriterMode = !prefs.typewriterMode; editor.applyMetrics() },
+            "keep the caret centred"
+        ),
+        SettingsSheet.Row(
+            "Hide syntax markers",
+            { onOff(prefs.hideMarkers) },
+            { prefs.hideMarkers = !prefs.hideMarkers; editor.restyleNow() }
+        ),
+        SettingsSheet.Row(
+            "Show raw source",
+            { onOff(prefs.sourceMode) },
+            { prefs.sourceMode = !prefs.sourceMode; editor.restyleNow() }
+        ),
+        SettingsSheet.Row(
+            "Orientation",
+            { prefs.orientation.name.lowercase() },
+            { d ->
+                val v = Orientation.values()
+                prefs.orientation = v[((prefs.orientation.ordinal + d) % v.size + v.size) % v.size]
+            }
+        ),
+        SettingsSheet.Row(
+            "Status bar",
+            { onOff(prefs.showStatusBar) },
+            { prefs.showStatusBar = !prefs.showStatusBar }
+        ),
+        SettingsSheet.Row(
+            "Auto screen refresh",
+            { if (prefs.autoRefreshEdits <= 0) "off" else "${prefs.autoRefreshEdits} edits" },
+            { d -> prefs.autoRefreshEdits = (prefs.autoRefreshEdits + d * 100).coerceIn(0, 3000) },
+            "clears E Ink ghosting"
+        ),
+        SettingsSheet.Row(
+            "Panel",
+            { Scale.describe() },
+            { },
+            "what sizing is based on"
+        )
+    )
+
+    private fun onOff(b: Boolean) = if (b) "on" else "off"
+
+    // ------------------------------------------------------------- commands
+
+    private class Cmd(val title: String, val keys: String, val run: () -> Unit)
+
+    private fun commands(): List<Cmd> = listOf(
+        Cmd("New document", "Ctrl N") { if (store.dirty) saveQuietly(); newDocument() },
+        Cmd("Open file…", "Ctrl O") { showFiles() },
+        Cmd("Save", "Ctrl S") { if (saveQuietly()) flash("Saved") },
+        Cmd("Rename document…", "") { promptRename() },
+        Cmd("Delete document", "") { promptDelete() },
+        Cmd("Set library folder to this folder", "") {
+            browseDir?.let { store.setLibraryRoot(it); flash("Library: ${it.name}") }
+        },
+        Cmd("Undo", "Ctrl Z") { if (!editor.undo()) flash("Nothing to undo") },
+        Cmd("Redo", "Ctrl Shift Z") { if (!editor.redo()) flash("Nothing to redo") },
+        Cmd("Outline", "Ctrl Shift O") { showOutline() },
+        Cmd("Find…", "Ctrl F") { openFind(false) },
+        Cmd("Replace…", "Ctrl H") { openFind(true) },
+        Cmd("Settings", "Ctrl ,") { showSettings() },
+
+        Cmd("Bold", "Ctrl B") { editor.toggleWrap("**") },
+        Cmd("Italic", "Ctrl I") { editor.toggleWrap("*") },
+        Cmd("Inline code", "Ctrl E") { editor.toggleWrap("`") },
+        Cmd("Strikethrough", "Ctrl Shift D") { editor.toggleWrap("~~") },
+        Cmd("Highlight", "") { editor.toggleWrap("==") },
+        Cmd("Link", "Ctrl K") { editor.toggleWrap("[", "](url)") },
+        Cmd("Heading 1", "Ctrl 1") { editor.setHeading(1) },
+        Cmd("Heading 2", "Ctrl 2") { editor.setHeading(2) },
+        Cmd("Heading 3", "Ctrl 3") { editor.setHeading(3) },
+        Cmd("Paragraph", "Ctrl 0") { editor.setHeading(0) },
+        Cmd("Bullet list", "Ctrl Shift L") { editor.togglePrefix("- ") },
+        Cmd("Numbered list", "Ctrl Shift N") { editor.togglePrefix("1. ") },
+        Cmd("Task list", "Ctrl Shift T") { editor.togglePrefix("- [ ] ") },
+        Cmd("Blockquote", "Ctrl Shift Q") { editor.togglePrefix("> ") },
+        Cmd("Code block", "Ctrl Shift K") { editor.insertBlock("```\n\n```\n", 5) },
+        Cmd("Horizontal rule", "Ctrl Shift H") { editor.insertBlock("\n---\n\n") },
+        Cmd("Table", "Ctrl Shift B") {
+            editor.insertBlock("\n| A | B |\n| --- | --- |\n|  |  |\n\n", 8)
+        },
+
+        Cmd("Toggle focus mode", "F8") {
+            prefs.focusMode = !prefs.focusMode; editor.restyleNow()
+            flash("Focus ${onOff(prefs.focusMode)}")
+        },
+        Cmd("Toggle typewriter mode", "F9") {
+            prefs.typewriterMode = !prefs.typewriterMode; editor.applyMetrics()
+            flash("Typewriter ${onOff(prefs.typewriterMode)}")
+        },
+        Cmd("Toggle raw source", "Ctrl /") {
+            prefs.sourceMode = !prefs.sourceMode; editor.restyleNow()
+            flash("Source ${onOff(prefs.sourceMode)}")
+        },
+        Cmd("Toggle status bar", "F11") {
+            prefs.showStatusBar = !prefs.showStatusBar; applyChrome()
+        },
+        Cmd("Rotate screen", "Ctrl Shift R") {
+            val v = Orientation.values()
+            prefs.orientation = v[(prefs.orientation.ordinal + 1) % v.size]
+            applyOrientation()
+        },
+        Cmd("Bigger interface", "Ctrl =") { nudgeScale(1) },
+        Cmd("Smaller interface", "Ctrl -") { nudgeScale(-1) },
+        Cmd("Reset interface size", "Ctrl Shift 0") {
+            Scale.setUiScale(prefs, 1f); editor.applyMetrics(); flash("Scale 100%")
+        },
+        Cmd("Refresh screen", "Ctrl R") { flashRefresh() },
+        Cmd("Word count", "Ctrl W") {
+            val w = DocStore.countWords(editor.text)
+            flash("$w words · ${editor.text.length} characters · ${readingTime(w)}")
+        },
+        Cmd("Export to HTML", "Ctrl Shift M") { exportHtml() },
+        Cmd("Export to PDF", "Ctrl Shift P") { exportPdf() }
+    )
+
+    private fun nudgeScale(dir: Int) {
+        Scale.setUiScale(prefs, Scale.ui + dir * Scale.UI_STEP)
+        // Rebuilding swaps the whole view tree, so it must not happen while the
+        // key event that triggered it is still being dispatched through it.
+        ui.post {
+            rebuildChrome()
+            flash("Interface ${Math.round(Scale.ui * 100)}%")
+        }
+    }
+
+    /** Status bar and panels bake in point sizes, so a scale change rebuilds them. */
+    private fun rebuildChrome() {
+        val caret = editor.selectionStart
+        val body = editor.text.toString()
+        val scrollY = editor.scrollY
+        val wasDirty = store.dirty
+        root.removeAllViews()
+        buildUi()
+        setContentView(root)
+        applyChrome()
+        editor.setText(body)
+        editor.restyleNow()
+        editor.setSelection(caret.coerceIn(0, editor.text.length))
+        editor.requestFocus()
+        editor.post { editor.scrollTo(0, scrollY) }
+        store.dirty = wasDirty
+    }
+
+    // ------------------------------------------------------------ shortcuts
+
+    override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
+        if (ev.action == KeyEvent.ACTION_DOWN && handleShortcut(ev)) return true
+        return super.dispatchKeyEvent(ev)
+    }
+
+    private fun handleShortcut(ev: KeyEvent): Boolean {
+        val code = ev.keyCode
+
+        if (!ev.isCtrlPressed) {
+            if (code == KeyEvent.KEYCODE_ESCAPE || code == KeyEvent.KEYCODE_BACK) {
+                if (sheetsOpen()) { closeSheets(); return true }
+                if (findBar.visibility == View.VISIBLE) {
+                    findBar.hide(); editor.requestFocus(); return true
+                }
+                return false
+            }
+            // Leave every other bare key to whichever view has focus.
+            if (sheetsOpen()) return false
+            return when (code) {
+                KeyEvent.KEYCODE_F8 -> { runCmd("Toggle focus mode"); true }
+                KeyEvent.KEYCODE_F9 -> { runCmd("Toggle typewriter mode"); true }
+                KeyEvent.KEYCODE_F11 -> { runCmd("Toggle status bar"); true }
+                KeyEvent.KEYCODE_F5 -> { flashRefresh(); true }
+                else -> false
+            }
+        }
+
+        // Ctrl chords stay global so they work from a panel too.
+        val shift = ev.isShiftPressed
+        val title: String? = when (code) {
+            KeyEvent.KEYCODE_N -> if (shift) "Numbered list" else "New document"
+            KeyEvent.KEYCODE_O -> if (shift) "Outline" else "Open file…"
+            KeyEvent.KEYCODE_S -> "Save"
+            KeyEvent.KEYCODE_P -> if (shift) "Export to PDF" else null
+            KeyEvent.KEYCODE_M -> if (shift) "Export to HTML" else null
+            KeyEvent.KEYCODE_B -> if (shift) "Table" else "Bold"
+            KeyEvent.KEYCODE_I -> "Italic"
+            KeyEvent.KEYCODE_E -> "Inline code"
+            KeyEvent.KEYCODE_D -> if (shift) "Strikethrough" else null
+            KeyEvent.KEYCODE_K -> if (shift) "Code block" else "Link"
+            KeyEvent.KEYCODE_L -> if (shift) "Bullet list" else null
+            KeyEvent.KEYCODE_T -> if (shift) "Task list" else null
+            KeyEvent.KEYCODE_Q -> if (shift) "Blockquote" else null
+            KeyEvent.KEYCODE_H -> if (shift) "Horizontal rule" else "Replace…"
+            KeyEvent.KEYCODE_R -> if (shift) "Rotate screen" else "Refresh screen"
+            KeyEvent.KEYCODE_Z -> if (shift) "Redo" else "Undo"
+            KeyEvent.KEYCODE_Y -> "Redo"
+            KeyEvent.KEYCODE_F -> "Find…"
+            KeyEvent.KEYCODE_W -> "Word count"
+            KeyEvent.KEYCODE_COMMA -> "Settings"
+            KeyEvent.KEYCODE_SLASH -> "Toggle raw source"
+            KeyEvent.KEYCODE_EQUALS, KeyEvent.KEYCODE_PLUS -> "Bigger interface"
+            KeyEvent.KEYCODE_MINUS -> "Smaller interface"
+            KeyEvent.KEYCODE_1 -> "Heading 1"
+            KeyEvent.KEYCODE_2 -> "Heading 2"
+            KeyEvent.KEYCODE_3 -> "Heading 3"
+            KeyEvent.KEYCODE_0 -> if (shift) "Reset interface size" else "Paragraph"
+            else -> null
+        }
+
+        if (code == KeyEvent.KEYCODE_P && !shift) {
+            if (sheetsOpen()) closeSheets() else showPalette()
+            return true
+        }
+        if (code == KeyEvent.KEYCODE_G) {
+            val q = findBar.queryText()
+            if (q.isNotEmpty()) findNext(q, !shift) else openFind(false)
+            return true
+        }
+        if (code == KeyEvent.KEYCODE_4 || code == KeyEvent.KEYCODE_5 || code == KeyEvent.KEYCODE_6) {
+            editor.setHeading(code - KeyEvent.KEYCODE_0)
+            return true
+        }
+
+        if (title == null) return false
+        runCmd(title)
+        return true
+    }
+
+    private fun runCmd(title: String) {
+        commands().firstOrNull { it.title == title }?.run?.invoke()
+    }
+
+    // ---------------------------------------------------------------- find
+
+    private fun openFind(withReplace: Boolean) {
+        closeSheets()
+        findBar.show()
+        val sel = editor.text.subSequence(
+            min(editor.selectionStart, editor.selectionEnd),
+            max(editor.selectionStart, editor.selectionEnd)
+        ).toString()
+        if (sel.isNotEmpty() && sel.length < 80) findBar.setQuery(sel)
+        findBar.setStatus(if (withReplace) "Tab to the replace field" else "")
+    }
+
+    private fun findNext(q: String, forward: Boolean) {
+        val hay = editor.text.toString()
+        if (q.isEmpty() || hay.isEmpty()) return
+        val from = if (forward) max(editor.selectionEnd, 0) else max(editor.selectionStart - 1, 0)
+        var idx = if (forward) hay.indexOf(q, from, ignoreCase = true)
+        else hay.lastIndexOf(q, from, ignoreCase = true)
+        if (idx < 0) {
+            idx = if (forward) hay.indexOf(q, 0, ignoreCase = true)
+            else hay.lastIndexOf(q, hay.length, ignoreCase = true)
+            findBar.setStatus(if (idx >= 0) "wrapped" else "no match")
+        } else {
+            findBar.setStatus("")
+        }
+        if (idx < 0) return
+        lastFindIndex = idx
+        editor.setSelection(idx, idx + q.length)
+        editor.post { editor.centreCaret() }
+    }
+
+    private fun replaceOne(q: String, r: String) {
+        if (q.isEmpty()) return
+        val s = min(editor.selectionStart, editor.selectionEnd)
+        val e = max(editor.selectionStart, editor.selectionEnd)
+        val sel = editor.text.subSequence(s, e).toString()
+        if (sel.equals(q, ignoreCase = true)) {
+            editor.text.replace(s, e, r)
+            editor.setSelection(s + r.length)
+        }
+        findNext(q, true)
+    }
+
+    private fun replaceAll(q: String, r: String) {
+        if (q.isEmpty()) return
+        val body = editor.text.toString()
+        var count = 0
+        var i = body.indexOf(q, 0, ignoreCase = true)
+        while (i >= 0) { count++; i = body.indexOf(q, i + q.length, ignoreCase = true) }
+        if (count == 0) { findBar.setStatus("no match"); return }
+        val caret = editor.selectionStart
+        editor.setText(body.replace(q, r, ignoreCase = true))
+        editor.restyleNow()
+        editor.setSelection(caret.coerceIn(0, editor.text.length))
+        findBar.setStatus("replaced $count")
+    }
+
+    // -------------------------------------------------------------- exports
+
+    private fun exportHtml() {
+        val name = (store.current?.nameWithoutExtension ?: "document")
+        val out = File(exportDir(), "$name.html")
+        runCatching {
+            out.parentFile?.mkdirs()
+            out.writeText(Exporter.toHtml(editor.text.toString(), name), Charsets.UTF_8)
+        }.onSuccess { flash("HTML → ${out.absolutePath}") }
+            .onFailure { flash("Export failed: ${it.message}") }
+    }
+
+    private fun exportPdf() {
+        val name = (store.current?.nameWithoutExtension ?: "document")
+        val out = File(exportDir(), "$name.pdf")
+        val body = editor.text.toString()
+        flash("Building PDF…")
+        // Laying out and drawing every page is far too slow for the main thread
+        // on an RK3566; a long document would trip the ANR watchdog.
+        Thread {
+            val result = runCatching { Exporter.toPdf(body, prefs, out, name) }
+            ui.post {
+                result.onSuccess { flash("PDF → ${out.absolutePath}") }
+                    .onFailure { flash("Export failed: ${it.message}") }
+            }
+        }.start()
+    }
+
+    private fun exportDir(): File {
+        val lib = store.libraryRoot()
+        val exp = File(lib, "Exports")
+        return if (exp.mkdirs() || exp.isDirectory) exp else lib
+    }
+
+    // --------------------------------------------------------------- status
+
+    private fun updateStatus() {
+        if (!prefs.showStatusBar) return
+        val name = store.current?.name ?: "untitled"
+        val dot = if (store.dirty) " •" else ""
+        statusLeft.text = statusMessage ?: "$name$dot"
+
+        val words = DocStore.countWords(editor.text)
+        val modes = buildString {
+            if (prefs.focusMode) append("focus ")
+            if (prefs.typewriterMode) append("typewriter ")
+            if (prefs.sourceMode) append("source ")
+        }.trim()
+        statusRight.text = buildString {
+            if (modes.isNotEmpty()) append(modes).append("  ·  ")
+            append("$words words  ·  ${readingTime(words)}")
+            append("  ·  ${Math.round(Scale.ui * 100)}%")
+        }
+    }
+
+    private fun readingTime(words: Int): String {
+        val mins = Math.max(1, Math.round(words / 220f))
+        return "$mins min"
+    }
+
+    private fun flash(msg: String) {
+        statusMessage = msg
+        updateStatus()
+        ui.postDelayed({
+            statusMessage = null
+            updateStatus()
+        }, 3200)
+    }
+
+    private fun humanSize(bytes: Long): String = when {
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> "${bytes / 1024} kB"
+        else -> "${bytes / (1024 * 1024)} MB"
+    }
+
+    // ------------------------------------------------------------ e ink
+
+    /**
+     * Drives the panel to full black and back, which is the only reliable way to
+     * make an E Ink controller do a full-screen update and clear the grey ghosts
+     * that partial updates leave behind.
+     */
+    private fun flashRefresh() {
+        editsSinceRefresh = 0
+        val v = View(this).apply { setBackgroundColor(Color.BLACK) }
+        root.addView(
+            v, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        ui.postDelayed({
+            v.setBackgroundColor(Color.WHITE)
+            ui.postDelayed({ root.removeView(v) }, 70)
+        }, 90)
+    }
+
+    // -------------------------------------------------------------- prompts
+
+    private fun promptRename() {
+        sheet.configure(
+            "Rename", store.current?.name ?: "name.md", emptyList(),
+            "Type the new name, then Enter"
+        )
+        sheet.onPick = null
+        sheet.onFreeText = { name ->
+            closeSheets()
+            val f = store.rename(name)
+            flash(if (f != null) "Renamed to ${f.name}" else "Rename failed")
+            updateStatus()
+        }
+        sheet.show()
+    }
+
+    private fun promptDelete() {
+        val name = store.current?.name ?: return
+        sheet.configure(
+            "Delete $name?", "type DELETE to confirm", emptyList(),
+            "This cannot be undone"
+        )
+        sheet.onPick = null
+        sheet.onFreeText = { answer ->
+            closeSheets()
+            if (answer.equals("DELETE", ignoreCase = true)) {
+                val ok = store.delete()
+                if (ok) { editor.setText(""); newDocument() }
+                flash(if (ok) "Deleted $name" else "Delete failed")
+            } else flash("Not deleted")
+        }
+        sheet.show()
+    }
+
+    private fun openWithSave(f: File) {
+        if (store.dirty) saveQuietly()
+        loadInto(f)
+    }
+
+    companion object {
+        private val WELCOME = """
+            # Welcome to Slate
+
+            A distraction-free Markdown writer built for E Ink and a Bluetooth
+            keyboard. Markdown formats itself as you type; the syntax markers
+            disappear once the caret leaves the line, and come back in grey when
+            you move onto it again.
+
+            Press **Ctrl P** for the command palette. Every command is in there
+            with its shortcut, so nothing below needs memorising.
+
+            ## If anything looks too small
+
+            **Ctrl =** and **Ctrl -** resize the whole interface, text and panels
+            together, and it is remembered. Sizes are measured in real
+            millimetres against the panel, not in Android's `dp`, which is why
+            this app does not come out half-size the way most sideloaded apps do.
+
+            ## Writing
+
+            - **Ctrl B** bold, **Ctrl I** italic, **Ctrl E** code
+            - **Ctrl 1** to **Ctrl 6** headings, **Ctrl 0** back to paragraph
+            - **Ctrl Shift L** bullets, **Ctrl Shift N** numbers, **Ctrl Shift T** tasks
+            - Enter continues a list; Enter on an empty item ends it
+            - Tab and Shift Tab indent and outdent
+
+            ## Modes
+
+            - **F8** focus mode, which dims every paragraph but this one
+            - **F9** typewriter mode, which keeps the caret at the middle of the screen
+            - **Ctrl /** shows the raw Markdown when you want to see it
+            - **Ctrl R** flashes the panel to clear E Ink ghosting
+
+            ## Files
+
+            Documents are plain `.md` files under this folder, so the Supernote
+            file browser and a USB cable can both reach them. **Ctrl O** opens the
+            file list — typing a name that does not exist creates it.
+
+            ---
+
+            > Delete all of this and start writing.
+        """.trimIndent()
+    }
+}
