@@ -116,6 +116,12 @@ class MarkdownStyler(private val prefs: Prefs) {
 
     fun clearAll(text: Spannable) = clearSlateSpans(text, 0, text.length)
 
+    /** Drops this styler's spans over a range, leaving the text itself alone. */
+    fun clearRange(text: Spannable, from: Int, to: Int) {
+        val len = text.length
+        clearSlateSpans(text, from.coerceIn(0, len), to.coerceIn(0, len))
+    }
+
     // ---------------------------------------------------------------- lines
 
     /** Styles one line; returns the fenced-code state for the following line. */

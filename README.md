@@ -74,6 +74,15 @@ your eyes, two keystrokes fix it permanently.
 - **Not keyboard-only.** Tapping the status bar opens the command palette and
   tapping outside a panel closes it, so everything is reachable when the
   keyboard is not paired — which is exactly when you need it most.
+- **Built for long pieces, not just notes.** The editor holds spans only for a
+  window around the page rather than for the whole buffer, because every span
+  operation on a buffer gets slower as its span count grows — which is what
+  makes a naive Markdown editor bog down on a manuscript. Opening a document and
+  toggling a mode cost the same on a hundred thousand words as on ten thousand,
+  and an edit costs the edit rather than the document. The window widens as you
+  scroll, just after the scroll rather than during it, and is rebuilt only on a
+  jump. There is a benchmark in the test suite that fails if any of that stops
+  being true.
 - **Zero third-party dependencies.** No AndroidX, no Compose, no Play Services.
   Framework views start faster and repaint more predictably, and the APK is
   683 KB.

@@ -9,6 +9,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import java.io.File
 
 /**
  * How the app behaves on a manuscript rather than a note.
@@ -200,6 +201,138 @@ class LongFormBenchmarkTest {
                 "${"%.2f".format(small)}ms in a 10k-word one — editing is scaling " +
                 "with the document again",
             large < small * 8 + 5
+        )
+    }
+
+    private fun bookEditor(words: Int): MarkdownEditor {
+        val ctx = RuntimeEnvironment.getApplication()
+        val prefs = Prefs(ctx)
+        Scale.init(ctx, prefs)
+        val editor = MarkdownEditor(ctx)
+        editor.bind(prefs, MarkdownStyler(prefs))
+        editor.setText(book(words))
+        // Measured as well as laid out: without a measure pass the text Layout
+        // is never built, there is no viewport to read, and the window silently
+        // falls back to its fixed opening stretch — which would make a scroll
+        // test prove nothing at all.
+        editor.measure(
+            android.view.View.MeasureSpec.makeMeasureSpec(1600, android.view.View.MeasureSpec.EXACTLY),
+            android.view.View.MeasureSpec.makeMeasureSpec(1200, android.view.View.MeasureSpec.EXACTLY)
+        )
+        editor.layout(0, 0, 1600, 1200)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        editor.restyleNow()
+        return editor
+    }
+
+    private fun spanCount(e: MarkdownEditor) =
+        e.text.getSpans(0, e.text.length, SlateSpan::class.java).size
+
+    /**
+     * Hosted in a real activity: a standalone view never gets a text Layout
+     * under Robolectric, and without one there is no viewport, so the window
+     * falls back to its fixed opening stretch and a scroll test proves nothing.
+     */
+    private fun activityEditor(words: Int): Pair<MarkdownEditor, MainActivity> {
+        val ctx = RuntimeEnvironment.getApplication()
+        val prefs = Prefs(ctx)
+        val lib = File(ctx.cacheDir, "bench-${System.nanoTime()}").apply { mkdirs() }
+        prefs.libraryPath = lib.absolutePath
+        val doc = File(lib, "book.md")
+        doc.writeText(book(words))
+        prefs.lastFile = doc.absolutePath
+        prefs.lastCaret = 0
+        File(ctx.filesDir, "scratch.md").delete()
+        File(ctx.filesDir, "scratch.path").delete()
+
+        val a = org.robolectric.Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        fun find(v: android.view.View): MarkdownEditor? = when {
+            v is MarkdownEditor -> v
+            v is android.view.ViewGroup ->
+                (0 until v.childCount).firstNotNullOfOrNull { find(v.getChildAt(it)) }
+            else -> null
+        }
+        return find(a.window.decorView)!! to a
+    }
+
+    @Test
+    fun `scrolling through a book extends the window without unbounding it`() {
+        val (editor, _) = activityEditor(40_000)
+        assertTrue(
+            "no viewport means this test is not exercising the window at all",
+            editor.visibleOffsets() != null
+        )
+        val start = spanCount(editor)
+
+        // Total work per screen, the deferred widening included: the loop idles
+        // the looper inside the timing. On the device that part runs after the
+        // scroll rather than inside it, so this is the pessimistic reading.
+        var worst = 0.0
+        repeat(15) { step ->
+            val t0 = System.nanoTime()
+            editor.scrollTo(0, (step + 1) * editor.height)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            val ms = (System.nanoTime() - t0) / 1_000_000.0
+            if (ms > worst) worst = ms
+        }
+        val after = spanCount(editor)
+        println(
+            "BENCH scrolling: spans $start -> $after, worst step %.2fms, window ${editor.styledWindow()}"
+                .format(worst)
+        )
+
+        assertTrue("a scroll step cost %.1fms".format(worst), worst < 250.0)
+        assertTrue(
+            "styling grew without bound while scrolling: $start -> $after spans",
+            after < start * 12 + 500
+        )
+    }
+
+    /**
+     * The editor's own cost, which is the one the writer feels: opening a
+     * document, and toggling a mode. Both go through restyleNow, which styles a
+     * window around the page rather than the whole buffer.
+     */
+    @Test
+    fun `opening and toggling cost the page rather than the book`() {
+        val ctx = RuntimeEnvironment.getApplication()
+        val prefs = Prefs(ctx)
+        Scale.init(ctx, prefs)
+
+        println("BENCH ── words | restyleNow (ms) | spans held")
+        val costs = HashMap<Int, Double>()
+        val spans = HashMap<Int, Int>()
+
+        for (w in listOf(10_000, 50_000, 100_000)) {
+            val editor = MarkdownEditor(ctx)
+            editor.bind(prefs, MarkdownStyler(prefs))
+            editor.layout(0, 0, 1600, 1200)
+            editor.setText(book(w))
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+
+            val ms = median(7, warmup = 3) { editor.restyleNow() }
+            val held = editor.text.getSpans(0, editor.text.length, SlateSpan::class.java).size
+
+            costs[w] = ms
+            spans[w] = held
+            println("BENCH %,7d | %15.2f | %11d".format(w, ms, held))
+        }
+
+        // Both have to stay flat. If either climbs with the length of the
+        // document then the window is not doing its job and a manuscript is
+        // back to paying for itself on every open and every toggle.
+        val small = costs[10_000]!!
+        val large = costs[100_000]!!
+        assertTrue(
+            "restyleNow cost ${"%.1f".format(large)}ms at 100k words against " +
+                "${"%.1f".format(small)}ms at 10k — it is still styling the whole document",
+            large < small * 6 + 5
+        )
+        assertTrue(
+            "the buffer held ${spans[100_000]} spans at 100k words against " +
+                "${spans[10_000]} at 10k — the window is not bounding them",
+            spans[100_000]!! < spans[10_000]!! * 6 + 500
         )
     }
 }

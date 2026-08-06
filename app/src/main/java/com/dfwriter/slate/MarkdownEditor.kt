@@ -44,6 +44,8 @@ class MarkdownEditor @JvmOverloads constructor(
     private var downY = 0f
     private var downAt = 0L
     private var notATap = false
+    private var winStart = 0
+    private var winEnd = 0
 
     fun bind(prefs: Prefs, styler: MarkdownStyler) {
         this.prefs = prefs
@@ -497,15 +499,21 @@ class MarkdownEditor @JvmOverloads constructor(
         rememberCaretLine()
     }
 
+    /**
+     * Styles the page around what is on screen, and forgets the rest.
+     *
+     * Every span operation on a buffer gets slower as the buffer's total span
+     * count grows, so styling a whole manuscript makes the whole manuscript
+     * slower — to open, and to change a mode on. Holding spans only for a
+     * window around the viewport keeps that count bounded however long the
+     * piece is. The window then grows as the page is scrolled, and is thrown
+     * away and rebuilt only on a jump, where there is no continuity to keep.
+     */
     fun restyleNow() {
         val e = text ?: return
-        styling = true
-        try {
-            styler.restyleAll(e, selectionStart)
-            styler.applyFocus(e, selectionStart)
-        } finally {
-            styling = false
-        }
+        winStart = 0
+        winEnd = 0
+        ensureWindow()
         rememberCaretLine()
         // Not just invalidate. Several of these spans change how tall a line is
         // — an image, a table row, the space above a heading — and only some
@@ -533,6 +541,102 @@ class MarkdownEditor @JvmOverloads constructor(
         rememberCaretLine()
         requestLayout()
         invalidate()
+    }
+
+    /** The stretch of the document currently carrying spans. For tests. */
+    internal fun styledWindow(): Pair<Int, Int> = winStart to winEnd
+
+    /** The first and last character offsets currently on screen, if known. */
+    internal fun visibleOffsets(): Pair<Int, Int>? {
+        val l = layout ?: return null
+        if (height <= 0 || l.lineCount <= 0) return null
+        val top = scrollY.coerceAtLeast(0)
+        val bottom = (scrollY + height).coerceIn(0, l.height)
+        val first = l.getLineForVertical(top)
+        val last = l.getLineForVertical(bottom)
+        return l.getLineStart(first) to l.getLineEnd(last)
+    }
+
+    /**
+     * Widens the styled window to cover the page, extending it where the new
+     * text adjoins what is already styled and rebuilding it where it does not.
+     *
+     * Extending never touches what is above: unstyling a passed region would
+     * change its height and shift the line being read out from under the eye.
+     */
+    private fun ensureWindow() {
+        val e = text ?: return
+        val visible = visibleOffsets()
+        val from: Int
+        val to: Int
+        if (visible == null) {
+            // Before the first measure there is no viewport to work from, so a
+            // fixed opening stretch stands in. Anything shorter than it — every
+            // note, and every test — is simply styled whole.
+            from = 0
+            to = min(e.length, MIN_WINDOW)
+        } else {
+            from = (visible.first - MARGIN_CHARS).coerceAtLeast(0)
+            to = (visible.second + MARGIN_CHARS).coerceAtMost(e.length)
+        }
+
+        val fresh = winEnd == 0 && winStart == 0
+        if (!fresh && from >= winStart && to <= winEnd) return
+
+        val jumped = !fresh && (to < winStart || from > winEnd)
+        val rebuilt = fresh || jumped
+        styling = true
+        try {
+            if (rebuilt) {
+                // A jump has no continuity to preserve, so the old window goes
+                // and a new one is built where the page has landed.
+                if (jumped) styler.clearAll(e)
+                styler.restyleRange(e, from, to, selectionStart)
+                winStart = from
+                winEnd = to
+            } else {
+                if (from < winStart) {
+                    styler.restyleRange(e, from, winStart, selectionStart)
+                    winStart = from
+                }
+                if (to > winEnd) {
+                    styler.restyleRange(e, winEnd, to, selectionStart)
+                    winEnd = to
+                }
+            }
+            styler.applyFocus(e, selectionStart)
+        } finally {
+            styling = false
+        }
+        // A rebuilt window has to be measured again; an extension does not.
+        // Extending only adds spans below what is on screen, and asking for a
+        // layout pass there re-measures every line in the document — which on a
+        // manuscript costs far more than the styling it was meant to settle.
+        if (rebuilt) requestLayout()
+        invalidate()
+    }
+
+    /**
+     * Widening happens just after the scroll rather than during it. The window
+     * reaches thousands of characters beyond the page, so there is nothing to
+     * see at its edge, and doing the work inline would put the cost of styling
+     * and reflowing into the frame the finger is dragging.
+     */
+    private val extendWindow = Runnable {
+        if (::styler.isInitialized && !styling) ensureWindow()
+    }
+
+    override fun onScrollChanged(l: Int, t: Int, ol: Int, ot: Int) {
+        super.onScrollChanged(l, t, ol, ot)
+        if (!::styler.isInitialized) return
+        handler.removeCallbacks(extendWindow)
+        handler.post(extendWindow)
+    }
+
+    override fun onDetachedFromWindow() {
+        handler.removeCallbacks(extendWindow)
+        pendingRestyle?.let { handler.removeCallbacks(it) }
+        super.onDetachedFromWindow()
     }
 
     /** Restyles the one line containing [offset] and nothing else. */
@@ -807,6 +911,16 @@ class MarkdownEditor @JvmOverloads constructor(
         private val LIST_ITEM =
             Regex("^([ \\t]*)([-*+]|\\d{1,9}[.)])[ \\t]+(\\[[ xX]\\][ \\t]+)?")
         private val HEADING_PREFIX = Regex("^#{1,6}\\s+")
+
+        /**
+         * How much is styled before the view has been measured, and the least
+         * that is ever styled. Comfortably more than a note or a scene, so
+         * short documents behave exactly as they always did.
+         */
+        private const val MIN_WINDOW = 12_000
+
+        /** Styled either side of the page, so scrolling stays ahead of the eye. */
+        private const val MARGIN_CHARS = 6_000
 
         private const val MAX_HISTORY = 300
         private const val COALESCE_MS = 1200L
