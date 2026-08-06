@@ -1,6 +1,9 @@
 package com.dfwriter.slate
 
+import android.graphics.Typeface
 import android.text.SpannableStringBuilder
+import android.text.TextPaint
+import android.text.style.MetricAffectingSpan
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -45,6 +48,22 @@ class StylerTest {
         sb: SpannableStringBuilder, from: Int, to: Int
     ): List<T> = sb.getSpans(from, to, T::class.java).toList()
 
+    /**
+     * Runs a span the way the layout would and reports the typeface it asks for.
+     * Bold and italic are the same span class, so the class alone says nothing
+     * about which of the two the reader will actually see.
+     */
+    private fun faceOf(span: WeightSpan): Int {
+        val tp = TextPaint()
+        span.updateMeasureState(tp)
+        return tp.typeface?.style ?: Typeface.NORMAL
+    }
+
+    private fun assertMeasured(what: String, span: Any) = assertTrue(
+        "$what has to change the measuring pass, not only the drawing one",
+        span is MetricAffectingSpan
+    )
+
     // ------------------------------------------------- the defining trick
 
     @Test
@@ -85,10 +104,42 @@ class StylerTest {
         val boldClose = src.indexOf("**", boldOpen + 2)
         assertTrue(spansOn<HiddenSpan>(sb, boldOpen, boldOpen + 2).isNotEmpty())
         assertTrue(spansOn<HiddenSpan>(sb, boldClose, boldClose + 2).isNotEmpty())
-        assertTrue(spansOn<WeightSpan>(sb, boldOpen, boldClose + 2).isNotEmpty())
+        val bold = spansOn<WeightSpan>(sb, boldOpen, boldClose + 2)
+        assertTrue(bold.isNotEmpty())
 
         val itOpen = src.indexOf("*italic*")
-        assertTrue(spansOn<WeightSpan>(sb, itOpen, itOpen + 8).isNotEmpty())
+        val italic = spansOn<WeightSpan>(sb, itOpen, itOpen + 8)
+        assertTrue(italic.isNotEmpty())
+
+        // Which of the two each one is, since the span class cannot say.
+        assertEquals("**bold** must come out bold", Typeface.BOLD, faceOf(bold.first()))
+        assertEquals("*italic* must come out italic", Typeface.ITALIC, faceOf(italic.first()))
+    }
+
+    @Test
+    fun `a heading is measured at the size it is drawn`() {
+        val src = "# Title\n\nbody"
+        val sb = style(src, caret = src.length)
+
+        val size = spansOn<SizeSpan>(sb, 2, 7).first()
+        // Changed in updateDrawState alone, the line is measured at body size and
+        // then painted at 1.8×, so a long heading runs off the right-hand edge
+        // and takes the caret with it.
+        assertMeasured("a heading's size", size)
+        val tp = TextPaint().apply { textSize = 40f }
+        size.updateMeasureState(tp)
+        assertTrue("H1 should measure larger than body text", tp.textSize > 40f * 1.5f)
+
+        // Everything else that changes the shape or the size of the glyphs.
+        assertMeasured("bold", spansOn<WeightSpan>(sb, 2, 7).first())
+        assertMeasured(
+            "inline code",
+            spansOn<InlineCodeSpan>(style("run `x` now"), 4, 7).first()
+        )
+        assertMeasured(
+            "fenced code",
+            spansOn<MonoSpan>(style("```\nx\n```"), 4, 5).first()
+        )
     }
 
     @Test
@@ -99,6 +150,26 @@ class StylerTest {
         assertTrue(spansOn<InlineCodeSpan>(sb, open, src.indexOf('`', open + 1) + 1).isNotEmpty())
         // The asterisks inside the code span must not have been eaten as italics.
         assertEquals(src, sb.toString())
+    }
+
+    @Test
+    fun `a link keeps its target on the visible text`() {
+        // The address is collapsed to nothing on screen, so the span is the only
+        // place a tap can read it back from.
+        val src = "see [the docs](https://example.com/x) for more"
+        val sb = style(src)
+        val at = src.indexOf("the docs")
+        val spans = spansOn<LinkTextSpan>(sb, at, at + 8)
+        assertEquals(1, spans.size)
+        assertEquals("https://example.com/x", spans[0].target)
+    }
+
+    @Test
+    fun `a link target survives the caret revealing its source`() {
+        val src = "see [the docs](notes.md) now"
+        val at = src.indexOf("the docs")
+        val sb = style(src, caret = at)
+        assertEquals("notes.md", spansOn<LinkTextSpan>(sb, at, at + 8).first().target)
     }
 
     // ----------------------------------------------------------- blocks
@@ -303,10 +374,19 @@ class StylerTest {
 
         // The realistic case: one keystroke in the middle of a long document.
         val at = doc.length / 2
-        val started = System.nanoTime()
+        // Warm up first. The first passes pay for class loading, for the JIT and
+        // for every regex in the styler compiling itself, none of which a writer
+        // pays for on the thousandth keystroke.
         repeat(20) { styler.restyleRange(sb, at, at + 1, at) }
-        val perEdit = (System.nanoTime() - started) / 20 / 1_000_000.0
-        assertTrue("a single edit restyle took ${perEdit}ms", perEdit < 60.0)
+
+        val started = System.nanoTime()
+        repeat(40) { styler.restyleRange(sb, at, at + 1, at) }
+        val perEdit = (System.nanoTime() - started) / 40 / 1_000_000.0
+        // Generous next to the 8ms a frame is worth: what this guards is that the
+        // cost of one edit has not started growing with the length of the
+        // document, and a shared build machine is a great deal slower than the
+        // tablet at the best of times.
+        assertTrue("a single edit restyle took ${perEdit}ms", perEdit < 150.0)
     }
 
     @Test

@@ -29,6 +29,7 @@ class MarkdownEditor @JvmOverloads constructor(
 
     var onEdit: ((Int) -> Unit)? = null
     var onCaretMoved: (() -> Unit)? = null
+    var onLinkTapped: ((String) -> Unit)? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private val caretPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Ink.TEXT }
@@ -36,6 +37,8 @@ class MarkdownEditor @JvmOverloads constructor(
     private var lastCaretLineEnd = -1
     private var styling = false
     private var pendingRestyle: Runnable? = null
+    private var pendingFrom = -1
+    private var pendingTo = -1
     private var imeWanted = true
 
     fun bind(prefs: Prefs, styler: MarkdownStyler) {
@@ -43,10 +46,11 @@ class MarkdownEditor @JvmOverloads constructor(
         this.styler = styler
 
         // A picture that has finished decoding needs the line it sits on to be
-        // measured again, which only a restyle will do.
-        styler.onImageReady = {
+        // measured again, which only a restyle will do. That line and no more:
+        // restyling the document would look every other picture up again.
+        styler.onImageReady = { at ->
             if (isAttachedToWindow) {
-                restyleNow()
+                restyleLine(at)
                 requestLayout()
             }
         }
@@ -82,6 +86,9 @@ class MarkdownEditor @JvmOverloads constructor(
 
             override fun beforeTextChanged(s: CharSequence?, st: Int, count: Int, after: Int) {
                 removed = s?.subSequence(st, st + count)?.toString() ?: ""
+                // Reported before the change lands, because the selection moves
+                // during it and that alone can ask for a restyle.
+                styler.fencesChangedAt(st)
             }
 
             override fun onTextChanged(s: CharSequence?, st: Int, before: Int, count: Int) {
@@ -100,6 +107,75 @@ class MarkdownEditor @JvmOverloads constructor(
         })
 
         applyMetrics()
+    }
+
+    // ------------------------------------------------------------- links
+
+    /**
+     * Opens a link when its address is hidden, and places the caret when it is
+     * showing. The caret's own line always displays its Markdown, so the line
+     * you are working on stays editable by tap while every other link on the
+     * page behaves like a link.
+     */
+    override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+        if (event.actionMasked == android.view.MotionEvent.ACTION_UP &&
+            ::styler.isInitialized
+        ) {
+            val target = linkAt(event.x, event.y)
+            if (target != null) {
+                onLinkTapped?.invoke(target)
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
+    }
+
+    /** Internal so a test can aim at it without synthesising touch events. */
+    internal fun linkAt(x: Float, y: Float): String? {
+        val e = text ?: return null
+        val l = layout ?: return null
+
+        // getOffsetForPosition, not layout arithmetic of our own: it accounts for
+        // the padding and the scroll together, and getting that conversion wrong
+        // resolves the touch to the start of the line, which follows whichever
+        // link happens to come first rather than the one under the finger.
+        val off = getOffsetForPosition(x, y)
+        if (off < 0 || off > e.length) return null
+
+        val line = l.getLineForOffset(off)
+        val vx = x + scrollX - totalPaddingLeft
+        // A tap past the end of a line resolves to its last character, which
+        // would follow a link the finger never touched.
+        val slack = Scale.pt(3f)
+        if (vx < l.getLineLeft(line) - slack || vx > l.getLineRight(line) + slack) return null
+
+        if (MarkdownStyler.lineStartOf(e, off) == lastCaretLineStart) return null
+        return linkTargetAt(e, off)
+    }
+
+    /**
+     * Asks about the character under the offset rather than a range around it.
+     *
+     * The brackets either side of a link are collapsed to zero width, so a tap
+     * on the first letter resolves to the insertion point in front of it — one
+     * short of where the span begins. Each neighbouring character is checked in
+     * turn, nearest first, which finds the link without widening the hit area
+     * enough to catch the prose next door.
+     */
+    private fun linkTargetAt(e: Editable, off: Int): String? {
+        for (probe in intArrayOf(off, off - 1, off + 1)) {
+            if (probe < 0 || probe >= e.length) continue
+            val hit = e.getSpans(probe, probe + 1, LinkTextSpan::class.java)
+                .firstOrNull { it.target.isNotBlank() }
+            if (hit != null) return hit.target
+        }
+        return null
+    }
+
+    /** The link the caret is sitting in, for opening from the keyboard. */
+    fun linkAtCaret(): String? {
+        val e = text ?: return null
+        return linkTargetAt(e, selectionStart.coerceIn(0, e.length))
     }
 
     // ------------------------------------------------------- on-screen keys
@@ -338,9 +414,24 @@ class MarkdownEditor @JvmOverloads constructor(
 
     // ------------------------------------------------------------- styling
 
+    /**
+     * A big change is styled a moment late so the paste itself stays quick. The
+     * range of a cancelled restyle is carried into the new one rather than
+     * dropped: typing a character inside that window used to replace the pasted
+     * block's range with the one character's, leaving the paste unstyled.
+     */
     private fun scheduleRestyle(from: Int, to: Int, delay: Long) {
         pendingRestyle?.let { handler.removeCallbacks(it) }
-        val r = Runnable { runStyle(from, to) }
+        val f = if (pendingFrom < 0) from else min(pendingFrom, from)
+        val t = if (pendingTo < 0) to else max(pendingTo, to)
+        pendingFrom = f
+        pendingTo = t
+        val r = Runnable {
+            pendingRestyle = null
+            pendingFrom = -1
+            pendingTo = -1
+            runStyle(f, t)
+        }
         pendingRestyle = r
         if (delay <= 0L) r.run() else handler.postDelayed(r, delay)
     }
@@ -376,6 +467,19 @@ class MarkdownEditor @JvmOverloads constructor(
         invalidate()
     }
 
+    /** Restyles the one line containing [offset] and nothing else. */
+    private fun restyleLine(offset: Int) {
+        val e = text ?: return
+        val at = offset.coerceIn(0, e.length)
+        styling = true
+        try {
+            styler.restyleRange(e, at, at, selectionStart, withCaretLine = false)
+        } finally {
+            styling = false
+        }
+        invalidate()
+    }
+
     private fun rememberCaretLine() {
         val e = text ?: return
         lastCaretLineStart = MarkdownStyler.lineStartOf(e, selectionStart)
@@ -393,12 +497,16 @@ class MarkdownEditor @JvmOverloads constructor(
         styling = true
         try {
             if (movedLine && lastCaretLineStart >= 0 && lastCaretLineStart <= e.length) {
-                // Re-hide the markers on the line the caret just left.
+                // Re-hide the markers on the line the caret just left. Exactly
+                // that line: left to widen itself to the caret, this would
+                // restyle every line jumped over, and a jump to the far end of a
+                // long document happens on the UI thread.
                 styler.restyleRange(
-                    e, lastCaretLineStart, min(lastCaretLineEnd, e.length), selStart
+                    e, lastCaretLineStart, min(lastCaretLineEnd, e.length), selStart,
+                    withCaretLine = false
                 )
             }
-            if (movedLine) styler.restyleRange(e, ls, le, selStart)
+            if (movedLine) styler.restyleRange(e, ls, le, selStart, withCaretLine = false)
             if (prefs.focusMode) styler.applyFocus(e, selStart)
         } finally {
             styling = false
@@ -504,31 +612,38 @@ class MarkdownEditor @JvmOverloads constructor(
             e.insert(selectionStart, "  ")
             return
         }
-        eachSelectedLine { ls, _ -> e.insert(ls, "  ") }
+        rewriteSelectedLines { "  $it" }
     }
 
     private fun outdent() {
-        val e = text ?: return
-        eachSelectedLine { ls, _ ->
+        rewriteSelectedLines { line ->
             var n = 0
-            while (n < 2 && ls + n < e.length && e[ls + n] == ' ') n++
-            if (n > 0) e.delete(ls, ls + n)
+            while (n < 2 && n < line.length && line[n] == ' ') n++
+            line.substring(n)
         }
     }
 
-    private inline fun eachSelectedLine(body: (start: Int, end: Int) -> Unit) {
+    /**
+     * Rewrites every line the selection touches in a single replace. One line at
+     * a time would be one undo step and one restyle per line, so undoing a Tab
+     * across ten lines would take ten presses of Ctrl+Z.
+     */
+    private fun rewriteSelectedLines(transform: (String) -> String) {
         val e = text ?: return
+        val hadSelection = selectionStart != selectionEnd
+        val caret = selectionEnd
         val from = MarkdownStyler.lineStartOf(e, min(selectionStart, selectionEnd))
         val to = MarkdownStyler.lineEndOf(e, max(selectionStart, selectionEnd))
-        val starts = ArrayList<Int>()
-        var i = from
-        while (i <= to && i <= e.length) {
-            starts.add(i)
-            val le = MarkdownStyler.lineEndOf(e, i)
-            if (le >= e.length) break
-            i = le + 1
-        }
-        for (s in starts.asReversed()) body(s, MarkdownStyler.lineEndOf(e, s))
+        val block = e.subSequence(from, to).toString()
+        val out = block.split('\n').joinToString("\n") { transform(it) }
+        if (out == block) return
+        e.replace(from, to, out)
+        // Selected lines stay selected, so the command can be repeated. With no
+        // selection the caret keeps its place in its own line instead, rather
+        // than the line ending up selected under it.
+        val end = from + out.length
+        if (hadSelection) setSelection(from, end.coerceAtMost(e.length))
+        else setSelection((caret + out.length - block.length).coerceIn(from, end))
     }
 
     // -------------------------------------------------------- format verbs
@@ -566,35 +681,31 @@ class MarkdownEditor @JvmOverloads constructor(
 
     /** Sets, or clears, the ATX heading level on every selected line. */
     fun setHeading(level: Int) {
-        val e = text ?: return
-        eachSelectedLine { ls, le ->
-            val line = e.subSequence(ls, le).toString()
-            val m = Regex("^#{1,6}\\s+").find(line)
-            val stripped = if (m != null) line.substring(m.value.length) else line
-            val prefix = if (level <= 0) "" else "#".repeat(level) + " "
-            e.replace(ls, le, prefix + stripped)
+        val prefix = if (level <= 0) "" else "#".repeat(level) + " "
+        rewriteSelectedLines { line ->
+            val m = HEADING_PREFIX.find(line)
+            prefix + (if (m != null) line.substring(m.value.length) else line)
         }
     }
 
     /** Adds a line prefix such as `> ` or `- `, or removes it if already there. */
     fun togglePrefix(prefix: String) {
         val e = text ?: return
+        val token = prefix.trim()
         val allHave = selectedLines().all { (ls, le) ->
-            e.subSequence(ls, le).toString().trimStart().startsWith(prefix.trim())
+            e.subSequence(ls, le).toString().trimStart().startsWith(token)
         }
-        eachSelectedLine { ls, le ->
-            val line = e.subSequence(ls, le).toString()
-            if (allHave) {
-                val idx = line.indexOf(prefix.trim())
-                if (idx >= 0) {
-                    val cut = idx + prefix.trim().length +
-                            (if (line.length > idx + prefix.trim().length &&
-                                line[idx + prefix.trim().length] == ' '
+        rewriteSelectedLines { line ->
+            if (!allHave) prefix + line
+            else {
+                val idx = line.indexOf(token)
+                if (idx < 0) line else {
+                    val cut = idx + token.length +
+                            (if (line.length > idx + token.length &&
+                                line[idx + token.length] == ' '
                             ) 1 else 0)
-                    e.replace(ls, le, line.substring(0, idx) + line.substring(cut))
+                    line.substring(0, idx) + line.substring(cut)
                 }
-            } else {
-                e.insert(ls, prefix)
             }
         }
     }
@@ -627,6 +738,7 @@ class MarkdownEditor @JvmOverloads constructor(
     companion object {
         private val LIST_ITEM =
             Regex("^([ \\t]*)([-*+]|\\d{1,9}[.)])[ \\t]+(\\[[ xX]\\][ \\t]+)?")
+        private val HEADING_PREFIX = Regex("^#{1,6}\\s+")
 
         private const val MAX_HISTORY = 300
         private const val COALESCE_MS = 1200L

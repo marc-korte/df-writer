@@ -4,10 +4,12 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.text.Layout
+import android.text.Spanned
 import android.text.TextPaint
 import android.text.style.CharacterStyle
 import android.text.style.LeadingMarginSpan
 import android.text.style.LineBackgroundSpan
+import android.text.style.MetricAffectingSpan
 import android.text.style.ReplacementSpan
 import android.text.style.UpdateAppearance
 
@@ -53,14 +55,25 @@ class MarkerSpan(private val color: Int = Ink.MARKER) : CharacterStyle(), Update
     }
 }
 
-class SizeSpan(private val px: Int) : CharacterStyle(), UpdateAppearance, SlateSpan {
-    override fun updateDrawState(tp: TextPaint) {
+/**
+ * Anything that changes the size or the shape of the glyphs has to say so when
+ * the line is *measured*, not only when it is drawn. Changing it in
+ * updateDrawState alone had the layout measure a heading at body size and then
+ * paint it at 1.8×, so long headings ran off the right edge and the caret went
+ * with them.
+ */
+class SizeSpan(private val px: Int) : MetricAffectingSpan(), SlateSpan {
+    override fun updateDrawState(tp: TextPaint) = updateMeasureState(tp)
+
+    override fun updateMeasureState(tp: TextPaint) {
         tp.textSize = px.toFloat()
     }
 }
 
-class WeightSpan(private val style: Int) : CharacterStyle(), UpdateAppearance, SlateSpan {
-    override fun updateDrawState(tp: TextPaint) {
+class WeightSpan(private val style: Int) : MetricAffectingSpan(), SlateSpan {
+    override fun updateDrawState(tp: TextPaint) = updateMeasureState(tp)
+
+    override fun updateMeasureState(tp: TextPaint) {
         val old = tp.typeface
         // Combine with whatever weight is already in force, so italic inside a
         // heading comes out bold italic rather than replacing the bold. Resolved
@@ -79,8 +92,10 @@ class WeightSpan(private val style: Int) : CharacterStyle(), UpdateAppearance, S
     }
 }
 
-class MonoSpan(private val scale: Float = 0.94f) : CharacterStyle(), UpdateAppearance, SlateSpan {
-    override fun updateDrawState(tp: TextPaint) {
+class MonoSpan(private val scale: Float = 0.94f) : MetricAffectingSpan(), SlateSpan {
+    override fun updateDrawState(tp: TextPaint) = updateMeasureState(tp)
+
+    override fun updateMeasureState(tp: TextPaint) {
         tp.typeface = Typeface.MONOSPACE
         tp.textSize = tp.textSize * scale
     }
@@ -93,17 +108,26 @@ class StrikeSpan : CharacterStyle(), UpdateAppearance, SlateSpan {
     }
 }
 
-class LinkTextSpan : CharacterStyle(), UpdateAppearance, SlateSpan {
+/**
+ * The visible text of a link. It carries the target so a tap can find it: the
+ * URL itself is collapsed to nothing on screen, so there is nowhere else left
+ * to read it back from.
+ */
+class LinkTextSpan(val target: String = "") : CharacterStyle(), UpdateAppearance, SlateSpan {
     override fun updateDrawState(tp: TextPaint) {
         tp.isUnderlineText = true
     }
 }
 
-class InlineCodeSpan : CharacterStyle(), UpdateAppearance, SlateSpan {
+class InlineCodeSpan : MetricAffectingSpan(), SlateSpan {
     override fun updateDrawState(tp: TextPaint) {
+        updateMeasureState(tp)
+        tp.bgColor = Ink.CODE_BG          // colour alone; it costs no width
+    }
+
+    override fun updateMeasureState(tp: TextPaint) {
         tp.typeface = Typeface.MONOSPACE
         tp.textSize = tp.textSize * 0.92f
-        tp.bgColor = Ink.CODE_BG
     }
 }
 
@@ -447,6 +471,11 @@ class SpaceAboveSpan(private val px: Int) : android.text.style.LineHeightSpan, S
         text: CharSequence, start: Int, end: Int,
         spanstartv: Int, lineHeight: Int, fm: Paint.FontMetricsInt
     ) {
+        // Called once per laid-out line the span covers, so a heading long
+        // enough to wrap would otherwise get the gap opened up inside it. Only
+        // the line the span actually starts on is pushed down.
+        val spanStart = (text as? Spanned)?.getSpanStart(this) ?: -1
+        if (spanStart >= 0 && start > spanStart) return
         fm.ascent -= px
         fm.top -= px
     }

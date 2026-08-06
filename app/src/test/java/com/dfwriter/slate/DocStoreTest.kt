@@ -61,11 +61,17 @@ class DocStoreTest {
         prefs.libraryPath = readOnly.absolutePath
 
         val root = DocStore(ctx, prefs).libraryRoot()
-        assertFalse(
-            "an unwritable folder would fail every later save",
-            root.absolutePath == readOnly.absolutePath
-        )
-        assertTrue("the fallback must be writable", root.canWrite())
+        // Running as root — which a CI container usually is — the permission bit
+        // is ignored and the folder really is still writable, so there is
+        // nothing to reject. Whichever way the platform went, what comes back
+        // has to be a folder that can actually take a save.
+        if (!readOnly.canWrite()) {
+            assertFalse(
+                "an unwritable folder would fail every later save",
+                root.absolutePath == readOnly.absolutePath
+            )
+        }
+        assertTrue("the chosen folder must be writable", root.canWrite())
         readOnly.setWritable(true, false)
         readOnly.deleteRecursively()
     }
@@ -106,6 +112,18 @@ class DocStoreTest {
 
         assertNull("save must report failure rather than throw", store.save("replacement"))
         assertTrue("the original must not have been destroyed", f.isDirectory)
+
+        // The temp copy is deliberately left behind here: the swap never
+        // happened, so it holds the only complete copy of the new text. What
+        // must not happen is a pile of half-written spares beside it, or a
+        // temp file holding something other than what was being saved.
+        val leftovers = lib.listFiles()!!.filter { it.name.startsWith(".") }
+        assertEquals(
+            "only the temp copy of the new text may survive: $leftovers",
+            listOf(".precious.md.tmp"),
+            leftovers.map { it.name }
+        )
+        assertEquals("the rescued text must be whole", "replacement", leftovers[0].readText())
         f.deleteRecursively()
     }
 
@@ -128,7 +146,16 @@ class DocStoreTest {
         // Either it fails, or the platform ignored the permission; both are safe,
         // what matters is that it never throws on the autosave path.
         val made = store.createNamed(blocked, "nope")
-        if (made != null) assertTrue(made.exists())
+        if (blocked.canWrite()) {
+            // Root ignores the permission bit, so the folder is writable after
+            // all and a real file has to come back.
+            assertNotNull("a writable folder must yield a document", made)
+            assertEquals("nope.md", made!!.name)
+            assertTrue("the document must exist on disk", made.isFile)
+        } else {
+            assertNull("an unwritable folder must report failure, not a file", made)
+            assertFalse("nothing may be left behind", File(blocked, "nope.md").exists())
+        }
 
         blocked.setWritable(true, false)
         blocked.deleteRecursively()
@@ -150,6 +177,25 @@ class DocStoreTest {
         assertNull("renaming onto an existing file must be refused", store.rename("taken.md"))
         assertEquals("someone else", File(lib, "taken.md").readText())
         assertTrue("the document must still be there", renamed.exists())
+    }
+
+    @Test
+    fun `a name that only looks like it has an extension still gets one`() {
+        // "contains a dot" is not the test: a document called "Notes v1.2" would
+        // keep that name, and then drop out of the browser it was made from.
+        assertEquals("Notes v1.2.md", DocStore.ensureExt("Notes v1.2"))
+        assertEquals("Notes v1.2.md", DocStore.ensureExt("  Notes v1.2  "))
+        assertEquals("read.markdown", DocStore.ensureExt("read.markdown"))
+        assertEquals("shout.TXT", DocStore.ensureExt("shout.TXT"))
+
+        // Whatever name it settles on, the listing has to be willing to show it.
+        for (typed in listOf("Notes v1.2", "plain", "read.markdown", "shout.TXT", "notes.text")) {
+            val named = DocStore.ensureExt(typed)
+            assertTrue(
+                "\"$typed\" became \"$named\", which the browser would hide",
+                store.isText(File(lib, named))
+            )
+        }
     }
 
     @Test
@@ -244,5 +290,61 @@ class DocStoreTest {
         store.createAndOpen(lib, "doc")
         store.writeScratch("")
         assertNull(store.recoverableText("anything"))
+    }
+
+    @Test
+    fun `a save leaves nothing to recover`() {
+        // Regression: the shadow copy used to be left older than the file, so
+        // every launch after a normal save offered the previous text back.
+        store.createAndOpen(lib, "doc")
+        store.save("first pass")
+        assertNull("a saved document has nothing outstanding", store.recoverableText("first pass"))
+
+        store.save("second pass")
+        assertEquals("the shadow copy must track the file", "second pass", store.readScratch())
+        assertNull(store.recoverableText("second pass"))
+    }
+
+    @Test
+    fun `text kept when there was nowhere to save it is offered to whatever opens next`() {
+        // When the card cannot be written the text is parked with no document
+        // attached. It belongs to nothing, so nothing else would ever claim it,
+        // and dropping it would be the one loss this whole mechanism exists to
+        // prevent.
+        val homeless = DocStore(ctx, prefs)
+        homeless.writeScratch("words with nowhere to go")
+        assertNull("nothing open means no owner", homeless.scratchOwner())
+
+        store.createAndOpen(lib, "rescue")
+        assertEquals("words with nowhere to go", store.recoverableText(""))
+    }
+
+    @Test
+    fun `renaming carries the shadow copy with it`() {
+        store.createAndOpen(lib, "before")
+        store.save("body text")
+        store.writeScratch("body text plus unsaved words")
+
+        val renamed = store.rename("after.md")!!
+        assertEquals(
+            "the draft is matched by path, so it must follow the rename",
+            renamed.absolutePath, store.scratchOwner()
+        )
+        assertEquals("body text plus unsaved words", store.recoverableText("body text"))
+    }
+
+    @Test
+    fun `deleting a document takes its draft with it`() {
+        store.createAndOpen(lib, "doomed")
+        store.writeScratch("a draft of the doomed document")
+        assertTrue(store.delete())
+
+        assertNull("the draft must not outlive the document", store.readScratch())
+        assertNull(store.scratchOwner())
+
+        // A document made in the same minute can be handed the same name, and
+        // must not inherit the dead one's words.
+        store.createAndOpen(lib, "doomed")
+        assertNull(store.recoverableText(""))
     }
 }

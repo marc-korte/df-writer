@@ -3,6 +3,7 @@ package com.dfwriter.slate
 import android.content.Context
 import android.os.Environment
 import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -18,6 +19,14 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
         private set
 
     var dirty: Boolean = false
+
+    /**
+     * Held by everything that writes to the card or to the shadow copy, and by
+     * nothing else. What this object *remembers* — [current], [dirty], the
+     * preferences — stays main-thread only; only the writing is shared, and
+     * only [writeThrough] and [writeScratchFor] may be called from elsewhere.
+     */
+    private val ioLock = Any()
 
     val fallbackDir: File
         get() = File(ctx.getExternalFilesDir(null) ?: ctx.filesDir, "Documents")
@@ -71,8 +80,7 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
 
     fun isText(f: File): Boolean {
         val n = f.name.lowercase()
-        return n.endsWith(".md") || n.endsWith(".markdown") ||
-                n.endsWith(".txt") || n.endsWith(".mdown") || n.endsWith(".text")
+        return TEXT_EXT.any { n.endsWith(it) }
     }
 
     // ----------------------------------------------------------------- i/o
@@ -87,23 +95,80 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
         return body
     }
 
+    /**
+     * Writes [body] through to the open document and brings what the app
+     * remembers of it up to date. Main thread only, and only where the wait is
+     * acceptable — an explicit save, or the pause that must finish before the
+     * process can be killed. The autosave path calls [writeThrough] on a
+     * thread of its own instead, and does this bookkeeping itself.
+     */
     fun save(body: String): File? {
         val f = current ?: return null
-        return try {
+        if (!writeThrough(f, body)) return null
+        dirty = false
+        prefs.lastFile = f.absolutePath
+        return f
+    }
+
+    /**
+     * The disk half of a save: the temp copy, the swap onto [f], and the shadow
+     * copy that has to follow it. It touches nothing this object remembers, so
+     * it is safe to run off the main thread — and every writer in this class
+     * holds [ioLock], so two saves cannot interleave a rename with a temp
+     * write, nor one save's scratch body with another's owner.
+     *
+     * Returns false rather than throwing: this sits on the autosave path.
+     */
+    fun writeThrough(f: File, body: String): Boolean = synchronized(ioLock) {
+        try {
             f.parentFile?.mkdirs()
             // Write beside the target then swap, so a crash mid-write cannot
             // truncate the only copy of a draft.
             val tmp = File(f.parentFile, ".${f.name}.tmp")
-            tmp.writeText(body, Charsets.UTF_8)
+            writeSynced(tmp, body)
             if (!tmp.renameTo(f)) {
-                f.writeText(body, Charsets.UTF_8)
+                // Some cards refuse to rename onto a name that already exists.
+                // Move the old copy aside instead of truncating it, so a failure
+                // from here on still leaves one complete version on the card.
+                val aside = File(f.parentFile, ".${f.name}.bak")
+                var moved = false
+                if (f.isFile) {
+                    aside.delete()
+                    moved = f.renameTo(aside)
+                }
+                if (!tmp.renameTo(f)) {
+                    try {
+                        writeSynced(f, body)
+                    } catch (e: Exception) {
+                        // Put the previous text back rather than leaving a hole;
+                        // the new text is still whole in tmp.
+                        if (moved && !f.exists()) aside.renameTo(f)
+                        throw e
+                    }
+                }
+                if (moved) aside.delete()
                 tmp.delete()
             }
-            dirty = false
-            prefs.lastFile = f.absolutePath
-            f
+            // Without this the shadow copy is older than the file from here on,
+            // and the next launch would offer it as if it were newer.
+            writeScratchFor(f.absolutePath, body)
+            true
         } catch (e: Exception) {
-            null
+            false
+        }
+    }
+
+    /**
+     * Writes the whole body and asks the card to flush it before returning. A
+     * removable FAT card can otherwise acknowledge a write, take the rename, and
+     * still hold nothing but zeroes when the power goes.
+     */
+    private fun writeSynced(f: File, body: String) {
+        FileOutputStream(f).use { os ->
+            os.write(body.toByteArray(Charsets.UTF_8))
+            os.flush()
+            // Best effort: a card that will not sync still gets the write.
+            runCatching { os.fd.sync() }
         }
     }
 
@@ -155,6 +220,13 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
         return if (f.renameTo(target)) {
             current = target
             prefs.lastFile = target.absolutePath
+            // The shadow copy is matched by path, so a draft written before the
+            // rename would be refused after it.
+            runCatching {
+                if (scratchOwner() == f.absolutePath) {
+                    scratchOwnerFile.writeText(target.absolutePath, Charsets.UTF_8)
+                }
+            }
             target
         } else null
     }
@@ -163,6 +235,9 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
         val f = current ?: return false
         val ok = f.delete()
         if (ok) {
+            // A document made later in the same minute can be handed the same
+            // name, so the dead one's draft must not outlive it.
+            if (scratchOwner() == f.absolutePath) clearScratch()
             current = null
             prefs.lastFile = ""
         }
@@ -175,18 +250,35 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
     private val scratchOwnerFile: File get() = File(ctx.filesDir, "scratch.path")
 
     /**
-     * A shadow copy in private storage, written on every pause and whenever a
-     * save fails. It records which document it belongs to, so a later run can
-     * tell recovered text apart from text that simply belongs elsewhere.
+     * A shadow copy in private storage, written on every pause, after every
+     * save, and whenever a save fails. It records which document it belongs to,
+     * so a later run can tell recovered text apart from text that simply belongs
+     * elsewhere.
      *
      * After a clean exit this matches the file on disk, which is what makes the
      * recovery prompt silent in the normal case: there is nothing to recover
      * when the two agree.
      */
-    fun writeScratch(body: String) {
-        runCatching {
-            scratchBody.writeText(body, Charsets.UTF_8)
-            scratchOwnerFile.writeText(current?.absolutePath ?: "", Charsets.UTF_8)
+    fun writeScratch(body: String) = writeScratchFor(current?.absolutePath ?: "", body)
+
+    /**
+     * As [writeScratch], for a document the caller names. The autosave thread
+     * uses this one: [current] belongs to the main thread, and a save carries
+     * the document it was taken against with it anyway.
+     */
+    fun writeScratchFor(owner: String, body: String) {
+        // Serialised against every other writer here, so that the half-written
+        // window below cannot be widened by a second writer stepping into it.
+        synchronized(ioLock) {
+            runCatching {
+                // Body and owner cannot be written in one step, so the pair is
+                // disowned first. Dying between the writes then reads back as
+                // nothing to offer, rather than as one document's text filed
+                // under another document's name.
+                scratchOwnerFile.writeText(WRITING, Charsets.UTF_8)
+                scratchBody.writeText(body, Charsets.UTF_8)
+                scratchOwnerFile.writeText(owner, Charsets.UTF_8)
+            }
         }
     }
 
@@ -208,17 +300,30 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
      */
     fun recoverableText(against: String): String? {
         val scratch = readScratch() ?: return null
-        if (scratch.isEmpty() || scratch == against) return null
-        // Only offer text belonging to the document actually open, so switching
-        // files does not resurrect a draft from a different one.
-        if (scratchOwner() != current?.absolutePath) return null
+        if (scratch.isBlank() || scratch == against) return null
+        val owner = scratchOwner()
+        // Text kept when there was nowhere to save it has no owner. It belongs
+        // to no document, which is exactly why nothing else would ever offer it.
+        if (owner == null) return scratch
+        // Otherwise only offer text belonging to the document actually open, so
+        // switching files does not resurrect a draft from a different one.
+        if (owner != current?.absolutePath) return null
         return scratch
     }
 
     companion object {
+        /** What the browser shows, and what a new name is given if it has none. */
+        private val TEXT_EXT = listOf(".md", ".markdown", ".txt", ".mdown", ".text")
+
+        /** Marks the scratch pair as half-written; never equal to any path. */
+        private const val WRITING = "?"
+
         fun ensureExt(name: String): String {
             val n = name.trim()
-            return if (n.contains('.')) n else "$n.md"
+            // Not "contains a dot": "Notes v1.2" would keep a name the browser
+            // does not recognise as a document, and drop out of the list.
+            val lower = n.lowercase()
+            return if (TEXT_EXT.any { lower.endsWith(it) }) n else "$n.md"
         }
 
         fun slug(s: String): String =

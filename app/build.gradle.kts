@@ -13,8 +13,11 @@ val keystorePropsFile = rootProject.file("keystore.properties")
 val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
 }
-val hasSigningKey = keystorePropsFile.exists() &&
-        rootProject.file(keystoreProps.getProperty("storeFile", "")).exists()
+// Read before it is used: Project.file() rejects an empty path outright, so a
+// keystore.properties without a storeFile line would fail the build at
+// configuration time instead of falling back to the debug key as promised.
+val keystorePath = keystoreProps.getProperty("storeFile").orEmpty().trim()
+val hasSigningKey = keystorePath.isNotEmpty() && rootProject.file(keystorePath).exists()
 
 android {
     namespace = "com.dfwriter.slate"
@@ -27,14 +30,14 @@ android {
         // legacy external storage so the app can read/write /sdcard/Note
         // directly without depending on the system document picker.
         targetSdk = 29
-        versionCode = 8
-        versionName = "1.2.1"
+        versionCode = 9
+        versionName = "1.3.0"
     }
 
     signingConfigs {
         if (hasSigningKey) {
             create("sideload") {
-                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storeFile = rootProject.file(keystorePath)
                 storePassword = keystoreProps.getProperty("storePassword")
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")

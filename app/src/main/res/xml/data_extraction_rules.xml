@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 12 and later, both for cloud backup and for a device-to-device
+    transfer. Same rule as backup_rules.xml: the unsaved draft stays on the
+    device it was written on.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="scratch.md" />
+        <exclude domain="file" path="scratch.path" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="scratch.md" />
+        <exclude domain="file" path="scratch.path" />
+    </device-transfer>
+</data-extraction-rules>

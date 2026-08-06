@@ -247,22 +247,57 @@ class TableImageTest {
         throw AssertionError("timed out waiting for $what")
     }
 
-    @Test
-    fun `a real file on disk decodes and is drawn`() {
-        val png = File(dir, "real.png")
+    /** A real PNG on disk, of a real size, for the decoder to chew on. */
+    private fun writePng(f: File, w: Int, h: Int): File {
         val bmp = android.graphics.Bitmap.createBitmap(
-            40, 20, android.graphics.Bitmap.Config.ARGB_8888
+            w, h, android.graphics.Bitmap.Config.ARGB_8888
         )
-        png.outputStream().use {
+        f.outputStream().use {
             bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
         }
+        return f
+    }
 
-        assertNull("nothing may be decoded on the calling thread", ImageCache.peek(png, 1200))
+    @Test
+    fun `a real file on disk decodes and is drawn`() {
+        val png = writePng(File(dir, "real.png"), 40, 20)
+
         ImageCache.request(png, 1200) { }
-
         waitFor("the decode") { ImageCache.peek(png, 1200) != null }
-        assertNotNull(ImageCache.peek(png, 1200))
+
+        val bmp = ImageCache.peek(png, 1200)!!
+        assertEquals("a picture narrower than the column is left as it is", 40, bmp.width)
         assertFalse(ImageCache.isBroken(png, 1200))
+        // peek is called from the styler and from onDraw, so it must never go to
+        // disk: a width nobody has asked for stays empty however real the file.
+        assertNull("peek must not decode", ImageCache.peek(png, 600))
+    }
+
+    @Test
+    fun `a picture far wider than the column is decoded smaller`() {
+        // The whole point of the cache: a photo off a camera must not be held at
+        // full size to be drawn into a column a fraction of its width.
+        val png = writePng(File(dir, "wide.png"), 2400, 60)
+
+        ImageCache.request(png, 1200) { }
+        waitFor("the downsampled decode") { ImageCache.peek(png, 1200) != null }
+        val small = ImageCache.peek(png, 1200)!!
+
+        // Asked for more than the file holds, nothing is thrown away.
+        ImageCache.request(png, 4000) { }
+        waitFor("the full size decode") { ImageCache.peek(png, 4000) != null }
+        val full = ImageCache.peek(png, 4000)!!
+
+        assertEquals("nothing to sample away for a column wider than the file", 2400, full.width)
+        assertTrue(
+            "2400px in a 1200px column should have been sampled down, got ${small.width}",
+            small.width <= 1200
+        )
+        assertTrue(
+            "but never below the width it has to fill, got ${small.width}",
+            small.width >= 600
+        )
+        assertTrue("the smaller decode must cost less memory", small.byteCount < full.byteCount)
     }
 
     @Test
@@ -290,6 +325,13 @@ class TableImageTest {
         ImageCache.retryBroken()
         assertFalse("opening a document should give it another go",
             ImageCache.isBroken(gone, 800))
+
+        // Forgetting the failure is only half of it: the picture the user has
+        // just copied onto the card has to actually appear on the second look.
+        writePng(gone, 40, 20)
+        ImageCache.request(gone, 800) { }
+        waitFor("the retried decode") { ImageCache.peek(gone, 800) != null }
+        assertFalse("a file that decoded is not broken", ImageCache.isBroken(gone, 800))
     }
 
     // --------------------------------------------------------------- paths
@@ -308,6 +350,40 @@ class TableImageTest {
         assertEquals(
             File(dir, "with space.png").absolutePath,
             ImageCache.resolve("with%20space.png", dir)?.absolutePath
+        )
+    }
+
+    @Test
+    fun `a bracketed target may hold spaces and a title`() {
+        // ![a](<my photo.png> "caption") is how Markdown writes a name with a
+        // space in it, and a name with a space in it is what a scanner produces.
+        assertEquals(
+            File(dir, "my photo.png").absolutePath,
+            ImageCache.resolve("<my photo.png>", dir)?.absolutePath
+        )
+        assertEquals(
+            File(dir, "my photo.png").absolutePath,
+            ImageCache.resolve("<my photo.png> \"caption\"", dir)?.absolutePath
+        )
+        // A bare target ends where its title begins.
+        assertEquals(
+            File(dir, "photo.png").absolutePath,
+            ImageCache.resolve("photo.png \"caption\"", dir)?.absolutePath
+        )
+    }
+
+    @Test
+    fun `a plus in a file name is left alone`() {
+        // URL decoding would read "+" as a space and turn a file honestly named
+        // "C++.png" into one called "C  .png", which is not on the card.
+        assertEquals(
+            File(dir, "C++.png").absolutePath,
+            ImageCache.resolve("C++.png", dir)?.absolutePath
+        )
+        // Percent escapes are still decoded, so both spellings find one file.
+        assertEquals(
+            ImageCache.resolve("C++.png", dir)?.absolutePath,
+            ImageCache.resolve("C%2B%2B.png", dir)?.absolutePath
         )
     }
 

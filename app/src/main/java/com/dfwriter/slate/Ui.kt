@@ -87,7 +87,11 @@ object Ui {
         row.setBackgroundColor(if (selected) Ink.TEXT else Color.WHITE)
         for (i in 0 until row.childCount) {
             val c = row.getChildAt(i)
-            if (c is TextView) {
+            // A child that paints its own background — the stepper caps, which
+            // are white with a border — keeps its own colours. Inverting its
+            // text would leave white on white, and the steppers would disappear
+            // from whichever row is selected.
+            if (c is TextView && c.background == null) {
                 c.setTextColor(
                     if (selected) Color.WHITE
                     else (c.getTag(R_TAG_COLOR) as? Int ?: Ink.TEXT)

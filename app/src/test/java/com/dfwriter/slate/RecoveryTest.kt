@@ -54,11 +54,20 @@ class RecoveryTest {
         File(ctx.filesDir, "scratch.path").delete()
     }
 
-    private fun start(): MainActivity {
-        val c = Robolectric.buildActivity(MainActivity::class.java).setup()
-        shadowOf(Looper.getMainLooper()).idle()
-        return c.get()
-    }
+    private fun scratchFile() = File(RuntimeEnvironment.getApplication().filesDir, "scratch.md")
+
+    private fun scratchBody(): String? =
+        scratchFile().takeIf { it.exists() }?.readText()
+
+    private fun scratchOwner(): String? =
+        File(RuntimeEnvironment.getApplication().filesDir, "scratch.path")
+            .takeIf { it.exists() }?.readText()
+
+    private fun launch() =
+        Robolectric.buildActivity(MainActivity::class.java).setup()
+            .also { shadowOf(Looper.getMainLooper()).idle() }
+
+    private fun start(): MainActivity = launch().get()
 
     private fun find(root: View, match: (View) -> Boolean): View? {
         if (match(root)) return root
@@ -123,6 +132,62 @@ class RecoveryTest {
             visibleTexts(a).any { it.contains("recovered", ignoreCase = true) }
         )
         assertEquals("what reached the disk", editorOf(a).text.toString())
+    }
+
+    // ------------------------------------------------------- writing it out
+
+    @Test
+    fun `pausing leaves a shadow copy of the open document`() {
+        clearScratch()
+        val c = launch()
+        assertFalse("nothing may exist before the pause", scratchFile().exists())
+
+        c.pause()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        // Nothing was edited, so the shadow copy can only have come from the
+        // pause itself. Without this half there is never anything to recover.
+        assertEquals("what reached the disk", scratchBody())
+        assertEquals(doc.absolutePath, scratchOwner())
+    }
+
+    @Test
+    fun `pausing shadows what is on screen rather than what was loaded`() {
+        clearScratch()
+        val c = launch()
+        val editor = editorOf(c.get())
+        editor.setText("what reached the disk and then some more")
+        shadowOf(Looper.getMainLooper()).idle()
+
+        c.pause()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("what reached the disk and then some more", scratchBody())
+        assertEquals(doc.absolutePath, scratchOwner())
+        assertEquals(
+            "a pause saves as well, so the file must have caught up too",
+            "what reached the disk and then some more", doc.readText()
+        )
+    }
+
+    @Test
+    fun `pausing with the offer still unanswered does not destroy the draft`() {
+        val recovered = "what reached the disk plus the words that did not"
+        leaveScratch(recovered, doc.absolutePath)
+        val c = launch()
+        assertTrue(
+            "the prompt must be up for this to mean anything",
+            visibleTexts(c.get()).any { it.contains("recovered", ignoreCase = true) }
+        )
+        // The editor is showing the text from disk while the prompt waits, so a
+        // pause that wrote it through would overwrite the very draft on offer.
+        assertEquals("what reached the disk", editorOf(c.get()).text.toString())
+
+        c.pause()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("the offered draft must survive an unanswered pause", recovered, scratchBody())
+        assertEquals(doc.absolutePath, scratchOwner())
     }
 
     @Test

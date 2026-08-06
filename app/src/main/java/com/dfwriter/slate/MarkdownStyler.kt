@@ -36,8 +36,11 @@ class MarkdownStyler(private val prefs: Prefs) {
     /** Measures cell text so table columns can be sized. */
     var measure: android.text.TextPaint? = null
 
-    /** Invoked when an image finishes decoding and the view should restyle. */
-    var onImageReady: (() -> Unit)? = null
+    /**
+     * Invoked with the offset of an image that has finished decoding, so the
+     * view can restyle that one line rather than the whole document.
+     */
+    var onImageReady: ((Int) -> Unit)? = null
 
     private val headingRatio = floatArrayOf(1.80f, 1.50f, 1.28f, 1.14f, 1.02f, 0.96f)
 
@@ -50,15 +53,24 @@ class MarkdownStyler(private val prefs: Prefs) {
 
     // ---------------------------------------------------------------- entry
 
-    /** Restyle every line intersecting [from]..[to], plus the caret's line. */
-    fun restyleRange(text: Editable, from: Int, to: Int, caret: Int) {
+    /**
+     * Restyle every line intersecting [from]..[to], plus the caret's line.
+     *
+     * The caret's line is included because an edit reveals the markers there,
+     * but a caller that already knows which lines it wants — a caret jump, an
+     * image that has just decoded — passes [withCaretLine] false. Otherwise the
+     * range is stretched from the line asked for all the way to the caret, and
+     * jumping from the first line of a long document to the last would restyle
+     * everything in between on the UI thread.
+     */
+    fun restyleRange(text: Editable, from: Int, to: Int, caret: Int, withCaretLine: Boolean = true) {
         refreshMetrics()
         val len = text.length
         if (len == 0) return
 
         var s = lineStartOf(text, from.coerceIn(0, len))
         var e = lineEndOf(text, to.coerceIn(0, len))
-        if (caret in 0..len) {
+        if (withCaretLine && caret in 0..len) {
             s = minOf(s, lineStartOf(text, caret))
             e = maxOf(e, lineEndOf(text, caret))
         }
@@ -115,8 +127,7 @@ class MarkdownStyler(private val prefs: Prefs) {
         val reveal = !hideEnabled || caretHere
 
         // --- fenced code ------------------------------------------------
-        val fence = FENCE.matchEntire(line.trimEnd())
-        if (fence != null) {
+        if (isFenceLine(text, ls, le)) {
             paint(text, ls, le, CodeBlockSpan(0, ruleWidth()))
             markerRun(text, ls, le, reveal)
             return !inFence
@@ -249,16 +260,22 @@ class MarkdownStyler(private val prefs: Prefs) {
                 val file = ImageCache.resolve(m.groupValues[2], documentDir)
                 if (file != null) {
                     val bmp = ImageCache.peek(file, contentWidthPx)
-                    if (bmp == null && !ImageCache.isBroken(file, contentWidthPx)) {
-                        ImageCache.request(file, contentWidthPx) { onImageReady?.invoke() }
+                    val broken = ImageCache.isBroken(file, contentWidthPx)
+                    val span = ImageSpan(bmp, contentWidthPx, alt, broken, bodyPx)
+                    text.setSpan(span, st, en, EX)
+                    if (bmp == null && !broken) {
+                        // Only the line this picture is on is restyled when it
+                        // arrives. Restyling the document would look every other
+                        // picture up again, and in a document with more images
+                        // than the cache holds each lookup evicts and re-requests
+                        // another one, for as long as the file stays open. The
+                        // offset is read back off the span so it is still right
+                        // if the text moved while the decode was running.
+                        ImageCache.request(file, contentWidthPx) {
+                            val at = text.getSpanStart(span)
+                            onImageReady?.invoke(if (at >= 0) at else st)
+                        }
                     }
-                    text.setSpan(
-                        ImageSpan(
-                            bmp, contentWidthPx, alt,
-                            ImageCache.isBroken(file, contentWidthPx), bodyPx
-                        ),
-                        st, en, EX
-                    )
                     return@apply
                 }
             }
@@ -268,7 +285,7 @@ class MarkdownStyler(private val prefs: Prefs) {
         }
         apply(from, s, claimed, LINK) { st, en, m ->
             val textLen = m.groupValues[1].length
-            text.setSpan(LinkTextSpan(), st + 1, st + 1 + textLen, EX)
+            text.setSpan(LinkTextSpan(m.groupValues[2]), st + 1, st + 1 + textLen, EX)
             markerRun(text, st, st + 1, reveal)
             markerRun(text, st + 1 + textLen, en, reveal)
         }
@@ -533,39 +550,62 @@ class MarkdownStyler(private val prefs: Prefs) {
         return false
     }
 
+    // Whether an offset is inside a fence depends on every delimiter before it,
+    // so the obvious implementation walks the whole buffer on every keystroke.
+    // The delimiter positions are kept instead, and only the part of the
+    // document at or after the last edit is ever scanned again.
+    private var fenceOwner: CharSequence? = null
+    private var fenceLength = -1
+    private var fenceScanned = 0
+    private var fenceDirty = Int.MAX_VALUE
+    private val fenceStarts = ArrayList<Int>()
+
     /**
-     * Counts fence delimiters before [offset] without allocating a string per
-     * line — this runs on every keystroke, so it walks the characters directly.
+     * Told by the editor where the buffer is about to change, so the delimiters
+     * found before that point can be kept. Callers that do not report an edit —
+     * the exporter, the tests — are covered by the length check below; only a
+     * silent change that leaves the length alone could fool it.
      */
-    private fun fenceStateAt(text: CharSequence, offset: Int): Boolean {
-        var count = 0
-        var i = 0
-        while (i < offset) {
-            var e = i
-            while (e < offset && text[e] != '\n') e++
-            if (isFenceLine(text, i, e)) count++
-            i = e + 1
-        }
-        return count % 2 == 1
+    fun fencesChangedAt(offset: Int) {
+        if (offset < fenceDirty) fenceDirty = offset
     }
 
-    private fun isFenceLine(text: CharSequence, start: Int, end: Int): Boolean {
-        var i = start
-        var lead = 0
-        while (i < end && text[i] == ' ' && lead < 4) { i++; lead++ }
-        if (lead > 3 || i >= end) return false
-        val ch = text[i]
-        if (ch != '`' && ch != '~') return false
-        var run = 0
-        while (i < end && text[i] == ch) { i++; run++ }
-        if (run < 3) return false
-        // Only an info string may follow, and it may not contain the fence char.
-        while (i < end) {
-            val c = text[i]
-            if (c == ch) return false
-            i++
+    /** True when [offset], always a line start, sits inside a fenced block. */
+    private fun fenceStateAt(text: CharSequence, offset: Int): Boolean {
+        val dirty = fenceDirty
+        fenceDirty = Int.MAX_VALUE
+        if (text !== fenceOwner || (dirty == Int.MAX_VALUE && text.length != fenceLength)) {
+            fenceOwner = text
+            fenceStarts.clear()
+            fenceScanned = 0
+        } else if (dirty < fenceScanned) {
+            // The edited line itself may have just become, or stopped being, a
+            // delimiter, so the rescan starts at the top of it.
+            val from = lineStartOf(text, dirty.coerceIn(0, text.length))
+            while (fenceStarts.isNotEmpty() && fenceStarts.last() >= from) {
+                fenceStarts.removeAt(fenceStarts.size - 1)
+            }
+            fenceScanned = from
         }
-        return true
+        fenceLength = text.length
+
+        // Extend the table to cover [offset], walking the characters directly
+        // rather than allocating a string per line.
+        var i = fenceScanned
+        while (i < offset) {
+            var e = i
+            while (e < text.length && text[e] != '\n') e++
+            if (isFenceLine(text, i, e)) fenceStarts.add(i)
+            i = e + 1
+        }
+        if (i > fenceScanned) fenceScanned = i
+
+        var count = 0
+        for (s in fenceStarts) {
+            if (s >= offset) break
+            count++
+        }
+        return count % 2 == 1
     }
 
     companion object {
@@ -574,7 +614,6 @@ class MarkdownStyler(private val prefs: Prefs) {
         private val DELIMITER_ROW =
             Regex("^\\|?\\s*:?-{1,}:?\\s*(\\|\\s*:?-{1,}:?\\s*)*\\|?$")
 
-        private val FENCE = Regex("^\\s{0,3}(`{3,}|~{3,})\\s*[A-Za-z0-9+#._-]*$")
         private val HR = Regex("^\\s{0,3}([-*_])\\s*(\\1\\s*){2,}$")
         private val QUOTE = Regex("^\\s{0,3}(>\\s?)+")
         private val HEADING = Regex("^(#{1,6})\\s+")
@@ -590,6 +629,31 @@ class MarkdownStyler(private val prefs: Prefs) {
         private val STRIKE = Regex("~{2}(?!\\s)([^~\\n]+?)(?<!\\s)~{2}")
         private val HIGHLIGHT = Regex("={2}(?!\\s)([^=\\n]+?)(?<!\\s)={2}")
 
+        /**
+         * The one thing that decides what a fence is. Two answers to that
+         * question — one for the line being styled and another for the state it
+         * inherits — made a document render differently depending on where it
+         * was edited, and a fence such as ```{r} flip everything after it.
+         */
+        private fun isFenceLine(text: CharSequence, start: Int, end: Int): Boolean {
+            var i = start
+            var lead = 0
+            while (i < end && text[i] == ' ' && lead < 4) { i++; lead++ }
+            if (lead > 3 || i >= end) return false
+            val ch = text[i]
+            if (ch != '`' && ch != '~') return false
+            var run = 0
+            while (i < end && text[i] == ch) { i++; run++ }
+            if (run < 3) return false
+            // Only an info string may follow, and it may not contain the fence char.
+            while (i < end) {
+                val c = text[i]
+                if (c == ch) return false
+                i++
+            }
+            return true
+        }
+
         /** Headings in document order, skipping anything inside a code fence. */
         fun outline(text: CharSequence): List<Heading> {
             val out = ArrayList<Heading>()
@@ -600,7 +664,7 @@ class MarkdownStyler(private val prefs: Prefs) {
                 var e = i
                 while (e < len && text[e] != '\n') e++
                 val line = text.subSequence(i, e).toString()
-                if (FENCE.matchEntire(line.trimEnd()) != null) {
+                if (isFenceLine(text, i, e)) {
                     inFence = !inFence
                 } else if (!inFence) {
                     val m = HEADING.find(line)

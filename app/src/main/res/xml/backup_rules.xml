@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 11 and earlier. The shadow copy in private storage is the full text
+    of whatever was last being written, unsaved included, so it must not travel
+    to Google's servers or into an `adb backup` archive. Documents themselves
+    live on the SD card and are not part of app backup at all.
+-->
+<full-backup-content>
+    <exclude domain="file" path="scratch.md" />
+    <exclude domain="file" path="scratch.path" />
+</full-backup-content>

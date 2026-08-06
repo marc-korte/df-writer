@@ -20,6 +20,9 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.io.File
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 import kotlin.math.min
 
@@ -45,10 +48,31 @@ class MainActivity : Activity() {
     private var lastFindIndex = -1
     private var statusMessage: String? = null
     private var chromeStale = false
+    private var chromeUi = 1f
+    private var chromeBodyPt = 0f
+    private var recoveryPending = false
+    private var exporting = false
+
+    /**
+     * Where autosaves are written. A whole document, fsync'd onto a removable
+     * card, takes long enough that doing it on the main thread stutters the
+     * sentence being typed and, on a long document, reaches the ANR watchdog.
+     *
+     * One thread rather than a pool, so two writes of the same document can
+     * never be in flight together and the last one queued is the last one to
+     * land. A daemon thread: nothing here is worth holding a process open for
+     * that has otherwise finished.
+     *
+     * Internal rather than private so a test can stand it down and see that the
+     * pause path still writes — which is the whole point of the pause path.
+     */
+    internal val saveIo: ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "slate-save").apply { isDaemon = true }
+    }
 
     private val autosave = object : Runnable {
         override fun run() {
-            if (store.dirty) saveQuietly()
+            if (store.dirty) saveInBackground()
             ui.postDelayed(this, 4000)
         }
     }
@@ -97,19 +121,48 @@ class MainActivity : Activity() {
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
-        intent?.let { openFromIntent(it) }
+        // This activity is singleTask, so without setIntent it keeps its very
+        // first intent for good: a relaunch after the process died would hand
+        // restoreDocument that stale one and reopen the file the app was first
+        // started with, rather than the document last in use.
+        intent?.let { setIntent(it); openFromIntent(it) }
     }
 
     override fun onPause() {
         super.onPause()
+        // Everything from here down happens on this thread, because the process
+        // can be killed the moment this method returns and queued work would go
+        // with it. Drained unconditionally: a document that is already clean
+        // can still have its last autosave in flight, and saveQuietly — which
+        // drains as well — would not be reached to wait for it.
+        drainSaves()
         if (store.dirty) saveQuietly()
-        store.writeScratch(editor.text.toString())
+        // While the recovery prompt is unanswered the editor holds the text
+        // from disk, and writing that over the shadow copy would destroy the
+        // very draft being offered.
+        if (!recoveryPending) store.writeScratch(editor.text.toString())
         prefs.lastCaret = editor.selectionStart
     }
 
     override fun onDestroy() {
         ui.removeCallbacksAndMessages(null)
+        // After this nothing can be queued: the autosave callback has just been
+        // taken off the main thread, and it is the only thing that queues. A
+        // plain shutdown, so a write already running still finishes.
+        saveIo.shutdown()
         super.onDestroy()
+    }
+
+    /**
+     * Blocks until every autosave already handed to the save thread has reached
+     * the card. The queue is FIFO and one thread deep, so an empty task at the
+     * back of it can only finish once everything ahead of it has.
+     *
+     * Internal rather than private so a test can wait for the same thing the
+     * pause path waits for, instead of guessing at a delay.
+     */
+    internal fun drainSaves() {
+        runCatching { saveIo.submit { }.get(5, TimeUnit.SECONDS) }
     }
 
     // ----------------------------------------------------------------- view
@@ -195,6 +248,10 @@ class MainActivity : Activity() {
 
         wireCallbacks()
         updateStatus()
+        // The sizes this chrome was just built from. A later change compares
+        // against them to decide whether a rebuild is owed.
+        chromeUi = Scale.ui
+        chromeBodyPt = prefs.bodyPt
     }
 
     private fun sheetParams(): FrameLayout.LayoutParams {
@@ -216,21 +273,24 @@ class MainActivity : Activity() {
             ui.postDelayed(idleRefresh, 1400)
         }
         editor.onCaretMoved = { updateStatus() }
+        editor.onLinkTapped = { openLink(it) }
 
         sheet.onDismiss = { closeSheets() }
         settings.onDismiss = { closeSheets() }
         settings.onChanged = {
-            val before = Scale.ui
             Scale.init(this, prefs)
             editor.applyMetrics()
             applyOrientation()
             applyChrome()
             updateStatus()
             // The status bar and the panels bake their sizes in when they are
-            // built, so a scale change only reaches them through a rebuild.
+            // built, so a size change — the interface scale or the body text,
+            // both of which they measure themselves against — only reaches them
+            // through a rebuild. Compared against what the chrome was built
+            // from, since the row has already applied its change by now.
             // Deferred to when the panel closes, so stepping the value does not
             // tear the panel down under the user's finger.
-            if (Scale.ui != before) chromeStale = true
+            if (Scale.ui != chromeUi || prefs.bodyPt != chromeBodyPt) chromeStale = true
         }
 
         findBar.onDismiss = { findBar.hide(); editor.requestFocus() }
@@ -240,7 +300,10 @@ class MainActivity : Activity() {
     }
 
     private fun applyChrome() {
-        statusBar.visibility = if (prefs.showStatusBar) View.VISIBLE else View.GONE
+        // A flash needs somewhere to land even when the bar is switched off, or
+        // an error would be swallowed in silence; see flash().
+        statusBar.visibility =
+            if (prefs.showStatusBar || statusMessage != null) View.VISIBLE else View.GONE
         @Suppress("DEPRECATION")
         root.systemUiVisibility = (
                 View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -257,7 +320,7 @@ class MainActivity : Activity() {
         // The status bar and the stepper rows are built mirrored, so the view
         // tree has to be rebuilt for the change to show.
         flash(if (left) "Left-handed layout" else "Right-handed layout")
-        scheduleChromeRebuild()
+        rebuildChromeSoon()
     }
 
     private fun setOrientation(o: Orientation) {
@@ -341,8 +404,13 @@ class MainActivity : Activity() {
             ""
         )
         sheet.onFreeText = null
+        // Until this is answered the shadow copy is the only place the draft
+        // exists, so nothing may write over it. Dismissing the prompt without
+        // choosing leaves it alone too, and the offer comes back next start.
+        recoveryPending = true
         sheet.onPick = { item ->
             closeSheets()
+            recoveryPending = false
             if (item.payload == RECOVER_RESTORE) {
                 editor.setText(recovered)
                 editor.restyleNow()
@@ -375,11 +443,32 @@ class MainActivity : Activity() {
             val body = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
                 ?: return false
             val name = uri.lastPathSegment?.substringAfterLast('/') ?: "imported.md"
-            val dest = File(store.libraryRoot(), DocStore.ensureExt(name))
-            dest.writeText(body, Charsets.UTF_8)
+            val dest = importTarget(DocStore.ensureExt(name), body)
+            if (!dest.exists()) dest.writeText(body, Charsets.UTF_8)
             loadInto(dest)
             true
         }.getOrDefault(false)
+    }
+
+    /**
+     * Where an imported copy lands. Handing the same document over a second time
+     * must not overwrite the copy already edited here, so a name in use takes a
+     * suffix the way [DocStore.newFile] does — unless what is already there is
+     * identical, in which case that file is simply reopened rather than
+     * duplicated on every visit from the file manager.
+     */
+    private fun importTarget(fileName: String, body: String): File {
+        val dir = store.libraryRoot()
+        val stem = fileName.substringBeforeLast('.')
+        val ext = fileName.substringAfterLast('.', "md")
+        var f = File(dir, fileName)
+        var n = 2
+        while (f.exists()) {
+            if (f.isFile && runCatching { store.read(f) }.getOrNull() == body) return f
+            f = File(dir, "$stem-$n.$ext")
+            n++
+        }
+        return f
     }
 
     private fun loadInto(f: File) {
@@ -418,23 +507,68 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun saveQuietly(): Boolean {
-        val body = editor.text.toString()
-        if (store.current == null && store.createAndOpen(store.libraryRoot(), firstHeading(body)) == null) {
-            // Nowhere to write, so keep the text safe in private storage and
-            // leave the document dirty rather than pretending it was saved.
+    /**
+     * The file a save should land in, made if the document has never had one.
+     * Null when there is nowhere to write at all, in which case the text is
+     * kept in private storage and the document is left dirty rather than
+     * pretending it was saved.
+     */
+    private fun saveTarget(body: String): File? {
+        store.current?.let { return it }
+        val made = store.createAndOpen(store.libraryRoot(), firstHeading(body))
+        if (made == null) {
             store.writeScratch(body)
             flash("Save failed — check storage permission")
-            return false
         }
-        val f = store.save(body)
-        if (f == null) {
+        return made
+    }
+
+    /** Saves on this thread, for the places that cannot outlive a wait. */
+    private fun saveQuietly(): Boolean {
+        // Anything already on its way to the card carries older text, and a
+        // save made here must be the last word rather than the first.
+        drainSaves()
+        val body = editor.text.toString()
+        saveTarget(body) ?: return false
+        if (store.save(body) == null) {
             store.writeScratch(body)
             flash("Save failed — check storage permission")
             return false
         }
         updateStatus()
         return true
+    }
+
+    /**
+     * The autosave path. The text is snapshotted here, on the main thread, and
+     * only the writing goes to [saveIo]; everything the app remembers about the
+     * document is still changed here, where it is read from.
+     */
+    private fun saveInBackground() {
+        val body = editor.text.toString()
+        val f = saveTarget(body) ?: return
+        // Cleared against the snapshot rather than when the write lands. An
+        // edit made while the write is in flight is not in the text being
+        // written, so it has to leave the document dirty for the next tick.
+        store.dirty = false
+        updateStatus()
+        saveIo.execute {
+            val ok = store.writeThrough(f, body)
+            // Text that did not reach the card is kept in private storage, the
+            // same as a failed save on the main thread does — and written from
+            // this thread, so the main one never waits on a failing card.
+            if (!ok) store.writeScratchFor(f.absolutePath, body)
+            ui.post {
+                // This thread outlives the activity, so a message posted from
+                // it can arrive after an onDestroy that could not cancel it.
+                if (isDestroyed || isFinishing) return@post
+                if (!ok) {
+                    store.dirty = true
+                    flash("Save failed — check storage permission")
+                    updateStatus()
+                }
+            }
+        }
     }
 
     private fun firstHeading(body: String): String? {
@@ -496,7 +630,11 @@ class MainActivity : Activity() {
             )
         }
         scrim.visibility = View.VISIBLE
-        sheet.configure("Files · ${dir.absolutePath}", "Filter, or type a new name…", items)
+        sheet.configure(
+            "Files · ${dir.absolutePath}",
+            "Filter · a new name, then Shift Enter to create it",
+            items
+        )
         sheet.onPick = { item ->
             val f = item.payload as? File
             when {
@@ -664,7 +802,11 @@ class MainActivity : Activity() {
         Cmd("Rename document…", "") { promptRename() },
         Cmd("Delete document", "") { promptDelete() },
         Cmd("Set library folder to this folder", "") {
-            browseDir?.let { store.setLibraryRoot(it); flash("Library: ${it.name}") }
+            // Before the file list has been opened there is no folder this could
+            // mean, and doing nothing at all would read as having worked.
+            val d = browseDir
+            if (d == null) flash("Open the file list first — Ctrl O")
+            else { store.setLibraryRoot(d); flash("Library: ${d.name}") }
         },
         Cmd("Undo", "Ctrl Z") { if (!editor.undo()) flash("Nothing to undo") },
         Cmd("Redo", "Ctrl Shift Z") { if (!editor.redo()) flash("Nothing to redo") },
@@ -679,6 +821,10 @@ class MainActivity : Activity() {
         Cmd("Strikethrough", "Ctrl Shift D") { editor.toggleWrap("~~") },
         Cmd("Highlight", "") { editor.toggleWrap("==") },
         Cmd("Link", "Ctrl K") { editor.toggleWrap("[", "](url)") },
+        Cmd("Open the link under the caret", "Ctrl Enter") {
+            val target = editor.linkAtCaret()
+            if (target.isNullOrBlank()) flash("The caret is not in a link") else openLink(target)
+        },
         Cmd("Heading 1", "Ctrl 1") { editor.setHeading(1) },
         Cmd("Heading 2", "Ctrl 2") { editor.setHeading(2) },
         Cmd("Heading 3", "Ctrl 3") { editor.setHeading(3) },
@@ -706,7 +852,12 @@ class MainActivity : Activity() {
             flash("Source ${onOff(prefs.sourceMode)}")
         },
         Cmd("Toggle status bar", "F11") {
-            prefs.showStatusBar = !prefs.showStatusBar; applyChrome()
+            prefs.showStatusBar = !prefs.showStatusBar
+            applyChrome()
+            // Nothing is written into the bar while it is hidden, so without
+            // this a bar brought back shows whatever it last held until the
+            // next keystroke.
+            updateStatus()
         },
         Cmd("Rotate screen", "Ctrl Shift R") {
             val v = Orientation.values()
@@ -738,7 +889,10 @@ class MainActivity : Activity() {
         Cmd("Bigger interface", "Ctrl =") { nudgeScale(1) },
         Cmd("Smaller interface", "Ctrl -") { nudgeScale(-1) },
         Cmd("Reset interface size", "Ctrl Shift 0") {
-            Scale.setUiScale(prefs, 1f); editor.applyMetrics(); flash("Scale 100%")
+            Scale.setUiScale(prefs, 1f)
+            editor.applyMetrics()
+            flash("Scale 100%")
+            rebuildChromeSoon()
         },
         Cmd("Refresh screen", "Ctrl R") { flashRefresh() },
         Cmd("Word count", "Ctrl W") {
@@ -752,7 +906,7 @@ class MainActivity : Activity() {
     private fun nudgeScale(dir: Int) {
         Scale.setUiScale(prefs, Scale.ui + dir * Scale.UI_STEP)
         flash("Interface ${Math.round(Scale.ui * 100)}%")
-        scheduleChromeRebuild()
+        rebuildChromeSoon()
     }
 
     private val rebuildChromeTask = Runnable { rebuildChrome() }
@@ -766,6 +920,15 @@ class MainActivity : Activity() {
     private fun scheduleChromeRebuild() {
         ui.removeCallbacks(rebuildChromeTask)
         ui.post(rebuildChromeTask)
+    }
+
+    /**
+     * As [scheduleChromeRebuild], but never while a panel is open: the rebuild
+     * would replace the panel under the finger that asked for it. Held over to
+     * [closeSheets], the same way a change made from the settings sheet is.
+     */
+    private fun rebuildChromeSoon() {
+        if (sheetsOpen()) chromeStale = true else scheduleChromeRebuild()
     }
 
     /** Status bar and panels bake in point sizes, so a scale change rebuilds them. */
@@ -808,6 +971,13 @@ class MainActivity : Activity() {
 
     private fun handleShortcut(ev: KeyEvent): Boolean {
         val code = ev.keyCode
+        // A held chord auto-repeats about twenty times a second. Only the size
+        // nudges are meant to be leant on; anything else would run once per
+        // repeat — twenty new documents, or twenty export threads writing the
+        // same PDF over each other. The repeat is dropped at each command
+        // rather than up front, so that a Ctrl chord this app does not claim,
+        // Ctrl with an arrow key say, still repeats in the editor.
+        val held = ev.repeatCount != 0
 
         if (!ev.isCtrlPressed) {
             if (code == KeyEvent.KEYCODE_ESCAPE || code == KeyEvent.KEYCODE_BACK) {
@@ -820,10 +990,10 @@ class MainActivity : Activity() {
             // Leave every other bare key to whichever view has focus.
             if (sheetsOpen()) return false
             return when (code) {
-                KeyEvent.KEYCODE_F8 -> { runCmd("Toggle focus mode"); true }
-                KeyEvent.KEYCODE_F9 -> { runCmd("Toggle typewriter mode"); true }
-                KeyEvent.KEYCODE_F11 -> { runCmd("Toggle status bar"); true }
-                KeyEvent.KEYCODE_F5 -> { flashRefresh(); true }
+                KeyEvent.KEYCODE_F8 -> { if (!held) runCmd("Toggle focus mode"); true }
+                KeyEvent.KEYCODE_F9 -> { if (!held) runCmd("Toggle typewriter mode"); true }
+                KeyEvent.KEYCODE_F11 -> { if (!held) runCmd("Toggle status bar"); true }
+                KeyEvent.KEYCODE_F5 -> { if (!held) flashRefresh(); true }
                 else -> false
             }
         }
@@ -840,6 +1010,8 @@ class MainActivity : Activity() {
             KeyEvent.KEYCODE_I -> "Italic"
             KeyEvent.KEYCODE_E -> "Inline code"
             KeyEvent.KEYCODE_D -> if (shift) "Strikethrough" else null
+            KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER ->
+                "Open the link under the caret"
             KeyEvent.KEYCODE_K -> if (shift) "Code block" else "Link"
             KeyEvent.KEYCODE_L -> if (shift) "Bullet list" else null
             KeyEvent.KEYCODE_T -> if (shift) "Task list" else null
@@ -862,20 +1034,23 @@ class MainActivity : Activity() {
         }
 
         if (code == KeyEvent.KEYCODE_P && !shift) {
-            if (sheetsOpen()) closeSheets() else showPalette()
+            if (!held) { if (sheetsOpen()) closeSheets() else showPalette() }
             return true
         }
         if (code == KeyEvent.KEYCODE_G) {
-            val q = findBar.queryText()
-            if (q.isNotEmpty()) findNext(q, !shift) else openFind(false)
+            if (!held) {
+                val q = findBar.queryText()
+                if (q.isNotEmpty()) findNext(q, !shift) else openFind(false)
+            }
             return true
         }
         if (code == KeyEvent.KEYCODE_4 || code == KeyEvent.KEYCODE_5 || code == KeyEvent.KEYCODE_6) {
-            editor.setHeading(code - KeyEvent.KEYCODE_0)
+            if (!held) editor.setHeading(code - KeyEvent.KEYCODE_0)
             return true
         }
 
         if (title == null) return false
+        if (held && title != "Bigger interface" && title != "Smaller interface") return true
         runCmd(title)
         return true
     }
@@ -957,15 +1132,22 @@ class MainActivity : Activity() {
     }
 
     private fun exportPdf() {
+        // A second run would be drawing into the same file as the first.
+        if (exporting) { flash("Still building the last PDF…"); return }
         val name = (store.current?.nameWithoutExtension ?: "document")
         val out = File(exportDir(), "$name.pdf")
         val body = editor.text.toString()
         flash("Building PDF…")
+        exporting = true
         // Laying out and drawing every page is far too slow for the main thread
         // on an RK3566; a long document would trip the ANR watchdog.
         Thread {
             val result = runCatching { Exporter.toPdf(body, prefs, out, name) }
             ui.post {
+                exporting = false
+                // The thread outlives the activity, and a message posted from it
+                // after onDestroy is one that onDestroy could not have cancelled.
+                if (isDestroyed || isFinishing) return@post
                 result.onSuccess { flash("PDF → ${out.absolutePath}") }
                     .onFailure { flash("Export failed: ${it.message}") }
             }
@@ -981,7 +1163,7 @@ class MainActivity : Activity() {
     // --------------------------------------------------------------- status
 
     private fun updateStatus() {
-        if (!prefs.showStatusBar) return
+        if (!prefs.showStatusBar && statusMessage == null) return
         val name = store.current?.name ?: "untitled"
         val dot = if (store.dirty) " •" else ""
         statusLeft.text = statusMessage ?: "☰  $name$dot"
@@ -1004,13 +1186,24 @@ class MainActivity : Activity() {
         return "$mins min"
     }
 
+    private val clearFlash = Runnable {
+        statusMessage = null
+        applyChrome()
+        updateStatus()
+    }
+
+    /**
+     * With the status bar switched off a message has nowhere to land, and "Save
+     * failed" is the one that must never go unseen. The bar therefore comes back
+     * for as long as the message lasts and then goes away again — a single
+     * shared timer, so a second message cannot be cut short by the first one's.
+     */
     private fun flash(msg: String) {
         statusMessage = msg
+        applyChrome()
         updateStatus()
-        ui.postDelayed({
-            statusMessage = null
-            updateStatus()
-        }, 3200)
+        ui.removeCallbacks(clearFlash)
+        ui.postDelayed(clearFlash, 3200)
     }
 
     private fun humanSize(bytes: Long): String = when {
@@ -1075,6 +1268,64 @@ class MainActivity : Activity() {
             } else flash("Not deleted")
         }
         sheet.show()
+    }
+
+    /**
+     * Follows a link. Three kinds, in the order a writer is likely to mean
+     * them: a heading in this document, another document beside it, and only
+     * then something the rest of the device should handle.
+     */
+    private fun openLink(raw: String) {
+        // A target may carry a title — [a](x.md "note") — and may be bracketed.
+        val trimmed = raw.trim()
+        val target = if (trimmed.startsWith("<")) {
+            val end = trimmed.indexOf('>')
+            (if (end > 0) trimmed.substring(1, end) else trimmed.substring(1)).trim()
+        } else {
+            // A title is quoted — [x](url "note") — so only a quote ends the
+            // target. Splitting at the first space instead would cut a heading
+            // anchor like #Chapter one down to #Chapter.
+            Regex("^(\\S+)\\s+[\"'(].*$").find(trimmed)?.groupValues?.get(1) ?: trimmed
+        }
+        if (target.isEmpty()) return
+
+        if (target.startsWith("#")) {
+            jumpToHeading(target.removePrefix("#"))
+            return
+        }
+
+        val hasScheme = Regex("^[A-Za-z][A-Za-z0-9+.-]*:").containsMatchIn(target)
+        if (!hasScheme) {
+            val here = store.current?.parentFile ?: store.libraryRoot()
+            val f = File(here, target)
+            if (f.isFile && store.isText(f)) {
+                openWithSave(f)
+                flash("Opened ${f.name}")
+                return
+            }
+        }
+
+        // Bare addresses are written without a scheme far more often than not.
+        val uri = Uri.parse(if (hasScheme) target else "https://$target")
+        val intent = Intent(Intent.ACTION_VIEW, uri)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { startActivity(intent) }
+            .onFailure { flash("Nothing on this device opens $uri") }
+    }
+
+    /** GitHub-style anchor: "my heading" matches "## My Heading". */
+    private fun jumpToHeading(anchor: String) {
+        val want = anchor.trim().lowercase().replace(' ', '-')
+        val heading = MarkdownStyler.outline(editor.text).firstOrNull {
+            it.title.lowercase().replace(Regex("[^a-z0-9 -]"), "").trim()
+                .replace(' ', '-') == want
+        }
+        if (heading == null) {
+            flash("No heading called “$anchor”")
+            return
+        }
+        editor.setSelection(heading.offset.coerceIn(0, editor.text.length))
+        editor.post { editor.centreCaret() }
     }
 
     private fun openWithSave(f: File) {

@@ -1,9 +1,14 @@
 package com.dfwriter.slate
 
+import android.content.pm.ActivityInfo
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.os.Looper
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
+import android.widget.TextView
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -12,9 +17,12 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
+import java.io.File
+import java.time.Duration
 
 /**
  * Drives the real activity with real key events. This is the layer where a
@@ -29,9 +37,16 @@ class ShortcutTest {
     private lateinit var controller: ActivityController<MainActivity>
     private lateinit var activity: MainActivity
     private lateinit var editor: MarkdownEditor
+    private lateinit var lib: File
 
     @Before
     fun setUp() {
+        val ctx = RuntimeEnvironment.getApplication()
+        // A library of its own, so what the file commands wrote can be read back
+        // off the disk rather than inferred from the status bar.
+        lib = File(ctx.cacheDir, "lib-${System.nanoTime()}").apply { mkdirs() }
+        Prefs(ctx).libraryPath = lib.absolutePath
+
         controller = Robolectric.buildActivity(MainActivity::class.java).setup()
         activity = controller.get()
         editor = findView(activity.window.decorView) { it is MarkdownEditor } as MarkdownEditor
@@ -45,6 +60,10 @@ class ShortcutTest {
 
     private fun idle() = shadowOf(Looper.getMainLooper()).idle()
 
+    /** Runs the delayed work too, for the things that undo themselves. */
+    private fun advance(ms: Long) =
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(ms))
+
     private fun findView(root: View, match: (View) -> Boolean): View? {
         if (match(root)) return root
         if (root is ViewGroup) {
@@ -55,11 +74,11 @@ class ShortcutTest {
         return null
     }
 
-    private fun chord(keyCode: Int, shift: Boolean = false) {
+    private fun chord(keyCode: Int, shift: Boolean = false, repeat: Int = 0) {
         var meta = KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
         if (shift) meta = meta or KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
         activity.dispatchKeyEvent(
-            KeyEvent(0, 0, KeyEvent.ACTION_DOWN, keyCode, 0, meta)
+            KeyEvent(0, 0, KeyEvent.ACTION_DOWN, keyCode, repeat, meta)
         )
         idle()
     }
@@ -81,6 +100,38 @@ class ShortcutTest {
     private fun visiblePanel(): View? = findView(activity.window.decorView) {
         (it is ListSheet || it is SettingsSheet) && it.visibility == View.VISIBLE
     }
+
+    /** The heading the open panel was configured with; a ListSheet's first child. */
+    private fun sheetTitle(): String {
+        val sheet = visiblePanel() as? ListSheet ?: return ""
+        return (sheet.getChildAt(0) as TextView).text.toString()
+    }
+
+    private fun textsIn(root: View): List<String> {
+        val out = ArrayList<String>()
+        fun walk(v: View) {
+            if (v is TextView && v.isShown) out.add(v.text.toString())
+            if (v is ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
+        }
+        walk(root)
+        return out
+    }
+
+    private fun visibleTexts(): List<String> = textsIn(activity.window.decorView)
+
+    /**
+     * The full-screen black view an E Ink refresh puts up. Matched on its shape
+     * rather than only its colour, since a selected row and a divider are black
+     * as well.
+     */
+    private fun flashOverlay(): View? = findView(activity.window.decorView) { v ->
+        v.javaClass == View::class.java &&
+                (v.background as? ColorDrawable)?.color == Color.BLACK &&
+                v.layoutParams?.height == ViewGroup.LayoutParams.MATCH_PARENT
+    }
+
+    private fun documentCount(): Int =
+        lib.listFiles()?.count { it.isFile && it.name.endsWith(".md") } ?: 0
 
     // ------------------------------------------------------------ formatting
 
@@ -143,6 +194,29 @@ class ShortcutTest {
         assertEquals("~~wrong~~ word", body())
     }
 
+    @Test
+    fun `the remaining ctrl shift chords insert their blocks`() {
+        setDoc("line", 0)
+        chord(KeyEvent.KEYCODE_N, shift = true)
+        assertEquals("1. line", body())
+
+        setDoc("line", 0)
+        chord(KeyEvent.KEYCODE_T, shift = true)
+        assertEquals("- [ ] line", body())
+
+        setDoc("text", 4)
+        chord(KeyEvent.KEYCODE_K, shift = true)
+        assertEquals("text\n```\n\n```\n", body())
+
+        setDoc("text", 4)
+        chord(KeyEvent.KEYCODE_H, shift = true)
+        assertEquals("text\n\n---\n\n", body())
+
+        setDoc("text", 4)
+        chord(KeyEvent.KEYCODE_B, shift = true)
+        assertEquals("text\n\n| A | B |\n| --- | --- |\n|  |  |\n\n", body())
+    }
+
     // ----------------------------------------------------------------- undo
 
     @Test
@@ -158,6 +232,61 @@ class ShortcutTest {
         assertEquals("**word**", body())
     }
 
+    @Test
+    fun `ctrl Y redoes as well`() {
+        setDoc("word", 0, 4)
+        chord(KeyEvent.KEYCODE_B)
+        chord(KeyEvent.KEYCODE_Z)
+        assertEquals("word", body())
+        chord(KeyEvent.KEYCODE_Y)
+        assertEquals("**word**", body())
+    }
+
+    // ----------------------------------------------------------------- files
+
+    @Test
+    fun `ctrl N starts a new empty document`() {
+        setDoc("what the old document said", 0)
+        val before = documentCount()
+        chord(KeyEvent.KEYCODE_N)
+        assertEquals("Ctrl+N should leave an empty page", "", body())
+        assertEquals("and a new file to put it in", before + 1, documentCount())
+    }
+
+    @Test
+    fun `ctrl S writes the document to the card`() {
+        setDoc("text that has to reach the card", 0)
+        chord(KeyEvent.KEYCODE_S)
+        val f = File(lib, "Welcome to Slate.md")
+        assertTrue("the document opened at startup should be on disk", f.isFile)
+        assertEquals("text that has to reach the card", f.readText())
+        assertTrue("a save should say so", visibleTexts().any { it.contains("Saved") })
+    }
+
+    @Test
+    fun `a held chord does not repeat a command meant to run once`() {
+        setDoc("still the same document", 0)
+        val before = documentCount()
+        // The second and later events of a held Ctrl+N.
+        chord(KeyEvent.KEYCODE_N, repeat = 1)
+        assertEquals("an auto-repeat must not make another document", before, documentCount())
+        assertEquals("still the same document", body())
+
+        // The size nudges are the exception: they are meant to be leant on.
+        val scale = Scale.ui
+        chord(KeyEvent.KEYCODE_EQUALS, repeat = 1)
+        assertTrue("Ctrl+= should still repeat", Scale.ui > scale)
+    }
+
+    @Test
+    fun `ctrl shift M exports HTML into the library`() {
+        setDoc("# Title\n\nbody", 0)
+        chord(KeyEvent.KEYCODE_M, shift = true)
+        val out = File(File(lib, "Exports"), "Welcome to Slate.html")
+        assertTrue("expected ${out.absolutePath}, saw ${visibleTexts()}", out.isFile)
+        assertTrue("the export should be real HTML", out.readText().contains("<h1>"))
+    }
+
     // --------------------------------------------------------------- panels
 
     @Test
@@ -165,6 +294,7 @@ class ShortcutTest {
         assertTrue("no panel should be open at rest", visiblePanel() == null)
         chord(KeyEvent.KEYCODE_P)
         assertTrue("Ctrl+P should open the palette", visiblePanel() is ListSheet)
+        assertEquals("Commands", sheetTitle())
         plainKey(KeyEvent.KEYCODE_ESCAPE)
         assertTrue("Escape should close the palette", visiblePanel() == null)
     }
@@ -179,14 +309,50 @@ class ShortcutTest {
 
     @Test
     fun `ctrl shift O opens the outline and ctrl O opens the file list`() {
+        // Both are the same class of panel, so only what they were configured
+        // with can tell them apart — swapping the two chords would otherwise go
+        // unnoticed.
+        setDoc("# A heading\n\nbody", 0)
         chord(KeyEvent.KEYCODE_O, shift = true)
-        assertTrue(visiblePanel() is ListSheet)
+        assertEquals("Outline", sheetTitle())
+        assertTrue("the outline should list the heading", visibleTexts().any { it == "A heading" })
         plainKey(KeyEvent.KEYCODE_ESCAPE)
 
         chord(KeyEvent.KEYCODE_O)
-        assertTrue(visiblePanel() is ListSheet)
+        assertTrue("expected the file list, got ${sheetTitle()}", sheetTitle().startsWith("Files ·"))
+        assertTrue(
+            "the library's own documents should be in it",
+            visibleTexts().any { it == "Welcome to Slate.md" }
+        )
         plainKey(KeyEvent.KEYCODE_ESCAPE)
         assertTrue(visiblePanel() == null)
+    }
+
+    @Test
+    fun `shift enter in the file list creates the name that was typed`() {
+        chord(KeyEvent.KEYCODE_O)
+        val sheet = visiblePanel() as ListSheet
+        val filter = findView(sheet) { it is EditText } as EditText
+        filter.setText("Wel")               // a subsequence of "Welcome to Slate.md"
+        idle()
+
+        // Plain Enter would open the highlighted match. Shift+Enter is how you
+        // say no, make the one I typed.
+        sheet.handleKey(
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent(
+                0, 0, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER, 0,
+                KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
+            )
+        )
+        idle()
+
+        assertTrue("Shift+Enter should have made Wel.md", File(lib, "Wel.md").isFile)
+        assertEquals("and opened it, empty", "", body())
+        assertTrue(
+            "the file it fuzzy-matched must be left alone",
+            File(lib, "Welcome to Slate.md").isFile
+        )
     }
 
     @Test
@@ -199,21 +365,123 @@ class ShortcutTest {
         assertEquals(View.GONE, bar.visibility)
     }
 
+    @Test
+    fun `ctrl H opens find with the replace field explained`() {
+        val bar = findView(activity.window.decorView) { it is FindBar } as FindBar
+        chord(KeyEvent.KEYCODE_H)
+        assertEquals(View.VISIBLE, bar.visibility)
+        assertTrue(
+            "Ctrl+H is replace, not plain find",
+            textsIn(bar).any { it == "Tab to the replace field" }
+        )
+    }
+
+    @Test
+    fun `ctrl G steps through the matches and wraps`() {
+        setDoc("alpha beta alpha", 0)
+        chord(KeyEvent.KEYCODE_F)
+        val bar = findView(activity.window.decorView) { it is FindBar } as FindBar
+        bar.setQuery("alpha")
+        idle()
+
+        chord(KeyEvent.KEYCODE_G)
+        assertEquals(0, editor.selectionStart)
+        assertEquals(5, editor.selectionEnd)
+
+        chord(KeyEvent.KEYCODE_G)
+        assertEquals("the second match", 11, editor.selectionStart)
+
+        chord(KeyEvent.KEYCODE_G)
+        assertEquals("and round to the first again", 0, editor.selectionStart)
+    }
+
+    /** The find bar's second field; the first one is the search itself. */
+    private fun replaceField(bar: FindBar): EditText =
+        (0 until bar.childCount).map { bar.getChildAt(it) }
+            .filterIsInstance<EditText>()
+            .first { it.hint?.toString() == "Replace with" }
+
+    private fun findBarButton(bar: FindBar, label: String): View =
+        findView(bar) { it is TextView && it.text.toString() == label }!!
+
+    /** Opens replace, fills both fields in, and presses All. */
+    private fun replaceAll(query: String, with: String): FindBar {
+        chord(KeyEvent.KEYCODE_H)
+        val bar = findView(activity.window.decorView) { it is FindBar } as FindBar
+        bar.setQuery(query)
+        replaceField(bar).setText(with)
+        idle()
+        findBarButton(bar, "All").performClick()
+        idle()
+        return bar
+    }
+
+    @Test
+    fun `replace all rewrites every match and undo puts the document back`() {
+        setDoc("alpha beta alpha gamma alpha", 6)
+
+        val bar = replaceAll("alpha", "omega")
+
+        assertEquals("omega beta omega gamma omega", body())
+        assertTrue(
+            "the count is the only feedback there is, saw ${textsIn(bar)}",
+            textsIn(bar).any { it == "replaced 3" }
+        )
+
+        // This is the one edit that rewrites the whole buffer through setText,
+        // so it is the one most likely to leave undo with nothing to work from.
+        chord(KeyEvent.KEYCODE_Z)
+        assertEquals(
+            "undo has to bring the whole document back in one step",
+            "alpha beta alpha gamma alpha", body()
+        )
+    }
+
+    @Test
+    fun `replace all matches whatever the case and says when nothing matched`() {
+        setDoc("Alpha alpha ALPHA", 0)
+        replaceAll("alpha", "beta")
+        assertEquals("find is case-insensitive, so replace has to be too", "beta beta beta", body())
+
+        val bar = replaceAll("nothing here", "x")
+        assertEquals("beta beta beta", body())
+        assertTrue(
+            "a replace that matched nothing must say so, saw ${textsIn(bar)}",
+            textsIn(bar).any { it == "no match" }
+        )
+    }
+
+    @Test
+    fun `replace all leaves the caret inside the document it just rewrote`() {
+        // The replacement is shorter than what it replaces, so a caret left
+        // where it was would be past the end of the new text.
+        setDoc("longword longword longword", 26)
+        replaceAll("longword", "x")
+        assertEquals("x x x", body())
+        assertTrue(
+            "the caret ended up at ${editor.selectionStart} in a ${body().length}-character document",
+            editor.selectionStart in 0..body().length
+        )
+    }
+
     // ---------------------------------------------------------------- modes
 
     @Test
     fun `F8 and F9 toggle focus and typewriter modes`() {
-        val prefs = Prefs(activity)
-        val focusBefore = prefs.focusMode
+        val focusBefore = Prefs(activity).focusMode
         plainKey(KeyEvent.KEYCODE_F8)
         assertEquals(!focusBefore, Prefs(activity).focusMode)
         plainKey(KeyEvent.KEYCODE_F8)
         assertEquals(focusBefore, Prefs(activity).focusMode)
 
-        val typeBefore = prefs.typewriterMode
+        val typeBefore = Prefs(activity).typewriterMode
         plainKey(KeyEvent.KEYCODE_F9)
         assertEquals(!typeBefore, Prefs(activity).typewriterMode)
         plainKey(KeyEvent.KEYCODE_F9)
+        assertEquals(
+            "a second F9 has to put typewriter mode back",
+            typeBefore, Prefs(activity).typewriterMode
+        )
     }
 
     @Test
@@ -223,6 +491,68 @@ class ShortcutTest {
         assertEquals(!before, Prefs(activity).sourceMode)
         chord(KeyEvent.KEYCODE_SLASH)
         assertEquals(before, Prefs(activity).sourceMode)
+    }
+
+    @Test
+    fun `F11 hides the status bar and brings it back up to date`() {
+        setDoc("one two three", 0)
+        assertTrue(
+            "the bar should be showing at rest, saw ${visibleTexts()}",
+            visibleTexts().any { it.contains("3 words") }
+        )
+
+        plainKey(KeyEvent.KEYCODE_F11)
+        assertTrue(
+            "F11 should hide the bar",
+            visibleTexts().none { it.contains("words") }
+        )
+
+        // Nothing is written into a hidden bar, so this is the count it would
+        // still be showing if bringing it back did not refresh it.
+        setDoc("one two three four five six", 0)
+        plainKey(KeyEvent.KEYCODE_F11)
+        assertTrue(
+            "the bar came back stale, showing ${visibleTexts()}",
+            visibleTexts().any { it.contains("6 words") }
+        )
+    }
+
+    @Test
+    fun `ctrl R and F5 flash the panel and clear it again`() {
+        assertTrue("nothing should be covering the page at rest", flashOverlay() == null)
+        chord(KeyEvent.KEYCODE_R)
+        assertTrue("Ctrl+R should black the panel out", flashOverlay() != null)
+        advance(400)
+        assertTrue("and take it away again", flashOverlay() == null)
+
+        plainKey(KeyEvent.KEYCODE_F5)
+        assertTrue("F5 is the same command", flashOverlay() != null)
+        advance(400)
+        assertTrue(flashOverlay() == null)
+    }
+
+    @Test
+    fun `ctrl shift R steps the screen orientation`() {
+        val before = Prefs(activity).orientation
+        chord(KeyEvent.KEYCODE_R, shift = true)
+        assertTrue(
+            "Ctrl+Shift+R should change the orientation",
+            Prefs(activity).orientation != before
+        )
+        assertEquals(
+            "and ask the system for the one it settled on",
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, activity.requestedOrientation
+        )
+    }
+
+    @Test
+    fun `ctrl W reports the word count`() {
+        setDoc("one two three", 0)
+        chord(KeyEvent.KEYCODE_W)
+        assertTrue(
+            "expected a word count in the status bar, saw ${visibleTexts()}",
+            visibleTexts().any { it.contains("3 words") && it.contains("characters") }
+        )
     }
 
     // ---------------------------------------------------------------- scale
@@ -260,7 +590,9 @@ class ShortcutTest {
         // what proves the real history came across.
         assertTrue(after.undo())
         assertEquals("word", after.text.toString())
-        assertTrue(after.undo())
+        // However many steps the typing became — that is a wall-clock rule — the
+        // rest of the history has to be there too.
+        while (after.undo()) { /* down to the bottom of the stack */ }
         assertEquals("", after.text.toString())
     }
 
@@ -301,12 +633,21 @@ class ShortcutTest {
     // ------------------------------------------------------------ typing
 
     @Test
-    fun `an unmodified key is left alone for the editor to handle`() {
-        setDoc("", 0)
-        val handled = activity.dispatchKeyEvent(
-            KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_A)
-        )
-        idle()
-        assertTrue("plain letters must not be swallowed as shortcuts", !handled || body() == "a")
+    fun `an unmodified key is not taken as a shortcut`() {
+        setDoc("make this bold", 5, 9)
+        // Every one of these is a chord's key. Without Ctrl the shortcut layer
+        // has to leave it to whatever has focus, which for a writer typing a
+        // sentence is the whole of the app working at all.
+        plainKey(KeyEvent.KEYCODE_B)
+        plainKey(KeyEvent.KEYCODE_N)
+        plainKey(KeyEvent.KEYCODE_O)
+        plainKey(KeyEvent.KEYCODE_P)
+        plainKey(KeyEvent.KEYCODE_COMMA)
+        plainKey(KeyEvent.KEYCODE_1)
+
+        assertTrue("a plain letter ran a formatting command", !body().contains("*"))
+        assertTrue("a plain letter ran a heading command", !body().contains("#"))
+        assertTrue("a plain letter opened a panel", visiblePanel() == null)
+        assertEquals("a plain letter made a document", 1, documentCount())
     }
 }

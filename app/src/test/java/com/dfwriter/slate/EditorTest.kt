@@ -1,15 +1,30 @@
 package com.dfwriter.slate
 
 import android.app.Activity
+import android.content.res.Configuration
+import android.os.Looper
 import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
+import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
 
 /** The editing verbs a writer hits dozens of times an hour. */
@@ -73,6 +88,26 @@ class EditorTest {
         set("see docs here", 4, 8)
         editor.toggleWrap("[", "](url)")
         assertEquals("see [docs](url) here", body())
+    }
+
+    @Test
+    fun `the link under the caret is found, and only there`() {
+        set("go [home](https://example.com) now", 0)
+        editor.restyleNow()
+
+        val inside = body().indexOf("home") + 2   // inside the visible link text
+        editor.setSelection(inside)
+        assertEquals("https://example.com", editor.linkAtCaret())
+
+        editor.setSelection(editor.text.length)   // out in the plain prose
+        assertNull(editor.linkAtCaret())
+    }
+
+    @Test
+    fun `plain text reports no link`() {
+        set("nothing to follow here", 4)
+        editor.restyleNow()
+        assertNull(editor.linkAtCaret())
     }
 
     // ------------------------------------------------------------- headings
@@ -195,18 +230,61 @@ class EditorTest {
         assertEquals("word  ", body())
     }
 
+    @Test
+    fun `rewriting every selected line is a single undo step`() {
+        // One replace per line would be one press of Ctrl+Z per line, which after
+        // a Tab across a paragraph is not undo so much as a chore.
+        set("one\ntwo\nthree", 0, 13)
+        editor.clearHistory()
+        pressTab()
+        assertEquals("  one\n  two\n  three", body())
+        assertEquals("indenting three lines must take one undo", 1, undoAll())
+        assertEquals("one\ntwo\nthree", body())
+
+        set("one\ntwo\nthree", 0, 13)
+        editor.clearHistory()
+        editor.setHeading(2)
+        assertEquals("## one\n## two\n## three", body())
+        assertEquals("so must heading three lines", 1, undoAll())
+        assertEquals("one\ntwo\nthree", body())
+    }
+
     // ----------------------------------------------------------------- undo
 
     private fun type(s: String) {
         for (c in s) editor.text.insert(editor.selectionStart, c.toString())
     }
 
+    /**
+     * Types [s] and reports whether it fitted inside the coalescing window.
+     *
+     * Whether a run of typing collapses into one undo step is decided against the
+     * wall clock, and the editor reads `System.currentTimeMillis()`, which
+     * Robolectric leaves alone for application code. A stall longer than the
+     * window really does end the run — that is the rule working — so a test that
+     * insists on a single step has to know its own typing was quick enough
+     * rather than fail on a pause it never controlled.
+     */
+    private fun typeWithinWindow(s: String): Boolean {
+        val started = System.currentTimeMillis()
+        type(s)
+        return System.currentTimeMillis() - started < COALESCE_MS
+    }
+
+    /** Undoes to the bottom of the stack; returns how many steps that took. */
+    private fun undoAll(): Int {
+        var steps = 0
+        while (editor.undo()) steps++
+        return steps
+    }
+
     @Test
     fun `undo reverses a run of typing in one step and redo restores it`() {
         set("", 0)
         editor.clearHistory()
-        type("hello")
+        val quickEnough = typeWithinWindow("hello")
         assertEquals("hello", body())
+        assumeTrue("typing itself outlasted the coalescing window", quickEnough)
 
         assertTrue(editor.undo())
         assertEquals("", body())
@@ -226,7 +304,9 @@ class EditorTest {
 
         assertTrue(editor.undo())
         assertEquals("word", body())     // the bold went, the typing stayed
-        assertTrue(editor.undo())
+        // However many steps the typing itself became, the bold was not folded
+        // into the first of them, which is the whole claim here.
+        undoAll()
         assertEquals("", body())
     }
 
@@ -253,7 +333,8 @@ class EditorTest {
         set("", 0)
         editor.clearHistory()
         type("abc")
-        editor.undo()
+        undoAll()
+        assertEquals("", body())
         type("xyz")
         assertTrue("redo must not resurrect an abandoned branch", !editor.redo())
         assertEquals("xyz", body())
@@ -270,17 +351,75 @@ class EditorTest {
         assertEquals(9, editor.selectionStart)
     }
 
+    // ----------------------------------------------------------- restyling
+
+    @Test
+    fun `a caret jump restyles only the lines it left and landed on`() {
+        // Widening the restyle to reach the caret would style every line jumped
+        // over, on the UI thread, which is what a jump to the far end of a long
+        // document would cost. An untouched line keeps the very span objects it
+        // already had; a restyle would have thrown them away and made new ones.
+        val src = "# One\n# Two\n# Three\n# Four"
+        set(src, src.length)
+        editor.restyleNow()
+
+        val middle = src.indexOf("# Three")
+        val before = editor.text.getSpans(middle, middle + 2, HiddenSpan::class.java).first()
+
+        editor.setSelection(0)
+        val after = editor.text.getSpans(middle, middle + 2, HiddenSpan::class.java).firstOrNull()
+        assertSame("a line the caret only flew over was restyled", before, after)
+
+        // The line the caret landed on does get its markers back.
+        assertTrue(editor.text.getSpans(0, 2, MarkerSpan::class.java).isNotEmpty())
+    }
+
     // ------------------------------------------------------------ metrics
 
     @Test
     fun `the text column is centred and bounded by the measure`() {
-        editor.layout(0, 0, 2560, 1920)          // Manta held sideways
+        editor.layout(0, 0, 2560, 1920)
         editor.applyMetrics()
         assertTrue("expected side margins", editor.paddingLeft > 0)
-        assertEquals(editor.paddingLeft, editor.paddingRight)
+        val column = 2560 - editor.paddingLeft - editor.paddingRight
         assertTrue(
             "the text column should not fill a 2560px panel edge to edge",
-            editor.paddingLeft * 2 > 200
+            column < 2560 - 200
+        )
+        // What bounds the column is the measure in characters, not the panel.
+        val em = editor.paint.measureText("abcdefghijklmnopqrstuvwxyz ") / 27f
+        assertEquals(
+            "the column should hold about ${prefs.measureChars} characters",
+            em * prefs.measureChars, column.toFloat(), em * 2f
+        )
+    }
+
+    /**
+     * Every other test here runs on Robolectric's default 320x470 mdpi screen,
+     * where the panel floor in [Scale.chooseDpi] never comes into play — so
+     * nothing was exercising the path this whole app exists for. This one runs
+     * against a Manta-shaped display, and goes through Scale.init and pt() the
+     * way the device does rather than calling chooseDpi directly.
+     */
+    @Test
+    @Config(qualifiers = "w1920dp-h2560dp-mdpi")
+    fun `on a 300 PPI panel the sizes come from the glass, not from the ROM`() {
+        // setUp ran Scale.init against this display.
+        assertEquals("the 300 PPI floor should have been applied", 300f, Scale.dpi, 0.5f)
+        assertTrue(
+            "the point of the floor is that the ROM claims less than the glass",
+            Scale.reportedDpi < Scale.dpi
+        )
+
+        editor.layout(0, 0, 1920, 2560)
+        editor.applyMetrics()
+        assertEquals(Scale.pt(prefs.bodyPt), editor.textSize, 0.5f)
+        // 13.5pt is about 3/16 of an inch, so about 56px at 300 PPI, where the
+        // density this ROM reports would have drawn it half that size.
+        assertTrue("body text came out at ${editor.textSize}px", editor.textSize > 50f)
+        assertTrue(
+            "the side margins keep their 6mm minimum",
+            editor.paddingLeft >= Scale.mmInt(6f)
         )
     }
 
@@ -296,6 +435,11 @@ class EditorTest {
         val large = editor.textSize
 
         assertTrue("scale must actually change the text size", large > small * 1.4f)
+    }
+
+    private companion object {
+        /** Mirrors COALESCE_MS in [MarkdownEditor], which is private to it. */
+        const val COALESCE_MS = 1200L
     }
 }
 
@@ -313,8 +457,172 @@ class ActivityStartupTest {
     }
 
     @Test
-    fun `a full lifecycle round trip does not throw`() {
+    fun `a lifecycle round trip keeps the document`() {
         val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
-        controller.pause().resume().pause().stop().destroy()
+        val activity = controller.get()
+        val text = "text that has to survive being put away"
+        editorOf(activity).setText(text)
+
+        controller.pause().resume()
+        assertEquals(
+            "the document should still be there after a pause and a resume",
+            text, editorOf(activity).text.toString()
+        )
+        assertTrue("activity finished during the round trip", !activity.isFinishing)
+        controller.pause().stop().destroy()
+    }
+
+    private fun editorOf(a: Activity): MarkdownEditor {
+        fun walk(v: View): MarkdownEditor? {
+            if (v is MarkdownEditor) return v
+            if (v is ViewGroup) {
+                for (i in 0 until v.childCount) walk(v.getChildAt(i))?.let { return it }
+            }
+            return null
+        }
+        return walk(a.window.decorView)!!
+    }
+}
+
+/**
+ * The one workaround this app cannot do without. The Manta ships exactly one
+ * IME, PinyinIME, and it swallows every hardware key it is offered without
+ * committing anything, so whenever a keyboard is attached the app takes its
+ * window out of the IME's path and the editor declines an input connection.
+ * Both halves are checked here: the day this stops working is the day nothing
+ * can be typed on the device at all.
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [30])
+class SoftInputTest {
+
+    private lateinit var controller: ActivityController<MainActivity>
+    private lateinit var activity: MainActivity
+    private lateinit var editor: MarkdownEditor
+    private lateinit var prefs: Prefs
+
+    @Before
+    fun setUp() {
+        prefs = Prefs(RuntimeEnvironment.getApplication())
+        // Decided when the editor is built, so it has to be set before that.
+        prefs.softKeyboard = SoftKeyboard.AUTO
+        controller = Robolectric.buildActivity(MainActivity::class.java).setup()
+        adopt()
+    }
+
+    @After
+    fun tearDown() {
+        controller.pause().stop().destroy()
+    }
+
+    /** Picks the activity and editor up again, in case a change replaced them. */
+    private fun adopt() {
+        activity = controller.get()
+        editor = walk(activity.window.decorView)!!
+        shadowOf(Looper.getMainLooper()).idle()
+    }
+
+    private fun walk(v: View): MarkdownEditor? {
+        if (v is MarkdownEditor) return v
+        if (v is ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))?.let { return it }
+        return null
+    }
+
+    /**
+     * Pairs or unpairs a keyboard, which reaches the app as a configuration
+     * change and nothing else.
+     *
+     * Set field by field rather than through a `qwerty` resource qualifier,
+     * because a qualifier can only say that a keyboard exists — it leaves
+     * `hardKeyboardHidden` undefined, and being *usable right now* is the half
+     * of the question that decides this.
+     */
+    private fun keyboard(attached: Boolean) {
+        controller.configurationChange(
+            Configuration(activity.resources.configuration).apply {
+                keyboard =
+                    if (attached) Configuration.KEYBOARD_QWERTY
+                    else Configuration.KEYBOARD_NOKEYS
+                hardKeyboardHidden =
+                    if (attached) Configuration.HARDKEYBOARDHIDDEN_NO
+                    else Configuration.HARDKEYBOARDHIDDEN_YES
+            }
+        )
+        adopt()
+    }
+
+    /**
+     * Whether the window has stopped being an input-method target. This is the
+     * decisive half: ViewRootImpl asks the *window's* flags, not the view's,
+     * before it offers a key to the IME at all.
+     */
+    private fun outOfTheImePath(): Boolean =
+        (activity.window.attributes.flags and
+                WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM) != 0
+
+    private fun connection(): InputConnection? = editor.onCreateInputConnection(EditorInfo())
+
+    @Test
+    fun `a hardware keyboard takes the window out of the IME's path`() {
+        keyboard(attached = true)
+
+        assertTrue(
+            "this test means nothing unless the device reports a keyboard",
+            editor.hasHardwareKeyboard()
+        )
+        assertTrue("the window must stop being an input-method target", outOfTheImePath())
+        assertNull("PinyinIME must not be handed a connection to eat keys through", connection())
+        assertFalse(
+            "and the on-screen keyboard must not come up over the page",
+            editor.showSoftInputOnFocus
+        )
+    }
+
+    @Test
+    fun `with no hardware keyboard the IME is left alone`() {
+        // Robolectric's device has no keyboard, which is this one with the
+        // Bluetooth keyboard unpaired.
+        assertFalse(editor.hasHardwareKeyboard())
+        assertFalse("suppressing the IME here leaves nothing to type on", outOfTheImePath())
+        assertNotNull("the on-screen keyboard needs the connection", connection())
+        assertTrue(editor.showSoftInputOnFocus)
+    }
+
+    @Test
+    fun `asking for the on-screen keyboard beats the hardware one`() {
+        keyboard(attached = true)
+        assertNull("suppressed to begin with", connection())
+
+        prefs.softKeyboard = SoftKeyboard.ALWAYS
+        editor.applySoftInputPolicy()
+
+        assertFalse("the setting has to win, or the command is a lie", outOfTheImePath())
+        assertNotNull(connection())
+    }
+
+    @Test
+    fun `turning the on-screen keyboard off suppresses it with no keyboard attached`() {
+        assertNotNull("nothing is suppressed to begin with", connection())
+
+        prefs.softKeyboard = SoftKeyboard.NEVER
+        editor.applySoftInputPolicy()
+
+        assertTrue(outOfTheImePath())
+        assertNull(connection())
+    }
+
+    @Test
+    fun `dropping the keyboard mid-session gives the on-screen one back`() {
+        keyboard(attached = true)
+        assertTrue(outOfTheImePath())
+
+        // Unpairing arrives the same way pairing did. Without this the editor
+        // would be left with no hardware keyboard and no on-screen one either,
+        // and no way at all to type.
+        keyboard(attached = false)
+
+        assertFalse(editor.hasHardwareKeyboard())
+        assertFalse("the on-screen keyboard is all there is now", outOfTheImePath())
+        assertNotNull(connection())
     }
 }

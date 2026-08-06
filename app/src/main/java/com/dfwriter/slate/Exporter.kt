@@ -17,10 +17,24 @@ object Exporter {
     private const val PAGE_H = 842
     private const val MARGIN = 64
 
-    fun toPdf(source: String, prefs: Prefs, out: File, title: String): File {
+    fun toPdf(
+        source: String, prefs: Prefs, out: File, title: String, documentDir: File? = null
+    ): File {
+        val width = PAGE_W - MARGIN * 2
+        // Pictures are resolved against the document's own folder, as they are in
+        // the editor; without the folder and the column width the styler leaves
+        // the raw ![alt](path) on the page.
+        val dir = documentDir
+            ?: prefs.lastFile.takeIf { it.isNotEmpty() }?.let { File(it).parentFile }
+        // This runs on the export thread. The layout is built once, so every
+        // bitmap has to be in hand before it is.
+        ImageCache.warm(source, dir, width)
+
         val styler = MarkdownStyler(prefs).apply {
             overrideBodyPx = 11f
             forceHideMarkers = true
+            contentWidthPx = width
+            this.documentDir = dir
         }
         val sb = SpannableStringBuilder(source)
         styler.restyleAll(sb, -1)
@@ -35,7 +49,6 @@ object Exporter {
             color = Ink.TEXT
         }
 
-        val width = PAGE_W - MARGIN * 2
         val usable = PAGE_H - MARGIN * 2
         val layout = StaticLayout.Builder
             .obtain(sb, 0, sb.length, paint, width)
@@ -284,8 +297,32 @@ object Md {
     private fun cells(row: String): List<String> =
         row.trim().trim('|').split('|').map { it.trim() }
 
+    /**
+     * Everything that reaches the page goes through here, attribute values
+     * included. The quotes matter: alt text and URLs are dropped inside quoted
+     * attributes below, so a bare one would let a document close the attribute
+     * and write its own onload= handler, which then runs at file:// origin.
+     */
     fun escape(s: String): String = s
         .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace("\"", "&quot;").replace("'", "&#39;")
+
+    /**
+     * Only schemes that cannot execute. Anything relative is a document beside
+     * this one and is left alone; javascript: is not written as a link at all.
+     */
+    private fun safeHref(url: String): Boolean {
+        val colon = url.indexOf(':')
+        if (colon < 0) return true
+        // A colon after the first slash, query or fragment is part of a path,
+        // not a scheme.
+        val mark = url.indexOfFirst { it == '/' || it == '?' || it == '#' }
+        if (mark in 0 until colon) return true
+        return when (url.substring(0, colon).lowercase()) {
+            "http", "https", "mailto" -> true
+            else -> false
+        }
+    }
 
     private fun inline(sIn: String): String {
         // Protect code spans from every other rule, exactly as Markdown requires.
@@ -300,7 +337,12 @@ object Md {
         s = Regex("!\\[([^\\]]*)]\\(([^)\\s]+)(?:\\s+&quot;([^&]*)&quot;)?\\)")
             .replace(s) { m -> "<img src=\"${m.groupValues[2]}\" alt=\"${m.groupValues[1]}\">" }
         s = Regex("\\[([^\\]]*)]\\(([^)\\s]+)\\)")
-            .replace(s) { m -> "<a href=\"${m.groupValues[2]}\">${m.groupValues[1]}</a>" }
+            .replace(s) { m ->
+                // An unusable scheme leaves the words behind and the link out.
+                if (safeHref(m.groupValues[2])) {
+                    "<a href=\"${m.groupValues[2]}\">${m.groupValues[1]}</a>"
+                } else m.groupValues[1]
+            }
         s = Regex("\\*{3}(?!\\s)(.+?)(?<!\\s)\\*{3}").replace(s) { "<strong><em>${it.groupValues[1]}</em></strong>" }
         s = Regex("\\*{2}(?!\\s)(.+?)(?<!\\s)\\*{2}").replace(s) { "<strong>${it.groupValues[1]}</strong>" }
         s = Regex("(?<![A-Za-z0-9_])_{2}(?!\\s)(.+?)(?<!\\s)_{2}(?![A-Za-z0-9_])").replace(s) { "<strong>${it.groupValues[1]}</strong>" }

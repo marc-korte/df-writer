@@ -242,6 +242,18 @@ class ListSheet(ctx: Context, private val prefs: Prefs) : LinearLayout(ctx) {
         onPick?.invoke(item)
     }
 
+    /**
+     * Takes what was typed as it stands. The filter matches subsequences, so a
+     * name being typed for a new file nearly always leaves something
+     * highlighted — "sate" finds "Welcome to Slate.md" — and plain Enter would
+     * open that instead. This is the way to say no, make the one I typed.
+     */
+    private fun pickTyped() {
+        val q = query()
+        val free = onFreeText
+        if (q.isEmpty() || free == null) pick() else free(q)
+    }
+
     // ---------------------------------------------------------------- keys
 
     fun handleKey(code: Int, ev: KeyEvent): Boolean = when (code) {
@@ -251,7 +263,12 @@ class ListSheet(ctx: Context, private val prefs: Prefs) : LinearLayout(ctx) {
         KeyEvent.KEYCODE_PAGE_UP -> { move(-8); true }
         KeyEvent.KEYCODE_MOVE_HOME -> { move(-9999); true }
         KeyEvent.KEYCODE_MOVE_END -> { move(9999); true }
-        KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> { pick(); true }
+        KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+            // Shift or Ctrl with Enter forces the typed text; Enter alone opens
+            // whatever the filter has highlighted.
+            if (ev.isShiftPressed || ev.isCtrlPressed) pickTyped() else pick()
+            true
+        }
         KeyEvent.KEYCODE_ESCAPE, KeyEvent.KEYCODE_BACK -> { onDismiss?.invoke(); true }
         KeyEvent.KEYCODE_TAB -> { move(if (ev.isShiftPressed) -1 else 1); true }
         else -> false
