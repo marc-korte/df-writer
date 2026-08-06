@@ -203,7 +203,7 @@ your own key instead, copy `keystore.properties.example` to
 
 ### Tests
 
-123 tests, all passing. They cover the parts that would otherwise fail silently:
+125 tests, all passing. They cover the parts that would otherwise fail silently:
 
 - **`PureLogicTest`** — the density decision against a truthful Manta, a Manta
   reporting a false 160 dpi, garbage metrics and an ordinary high-density phone;

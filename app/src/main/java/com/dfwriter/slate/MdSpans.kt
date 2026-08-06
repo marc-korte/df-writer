@@ -316,6 +316,11 @@ class TableRowSpan(
         paint: Paint, text: CharSequence, start: Int, end: Int, fm: Paint.FontMetricsInt?
     ): Int {
         if (fm != null) {
+            // Reset from the paint before adjusting. getSize may be called more
+            // than once for the same line, and adjusting the incoming metrics in
+            // place would add the padding again every time, so the rows would
+            // creep further apart the longer the table was on screen.
+            paint.getFontMetricsInt(fm)
             val extra = Math.round(pad)
             fm.ascent -= extra
             fm.top = fm.ascent

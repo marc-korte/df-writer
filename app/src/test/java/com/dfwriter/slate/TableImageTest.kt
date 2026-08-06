@@ -159,6 +159,46 @@ class TableImageTest {
         )
     }
 
+    @Test
+    fun `measuring a row twice does not make it taller`() {
+        // getSize may be called more than once for the same line. Adjusting the
+        // metrics it is handed, rather than deriving them from the paint, made
+        // the padding accumulate so rows crept further apart the longer a table
+        // stayed on screen.
+        val span = TableRowSpan(
+            cells = listOf("a", "b"),
+            widths = intArrayOf(100, 100),
+            aligns = intArrayOf(0, 0),
+            header = false,
+            pad = 12f,
+            rule = 2,
+            firstRow = false,
+            lastRow = false
+        )
+        val paint = TextPaint().apply { textSize = 40f }
+        val fm = android.graphics.Paint.FontMetricsInt()
+
+        span.getSize(paint, "x", 0, 1, fm)
+        val ascent = fm.ascent
+        val descent = fm.descent
+
+        repeat(5) { span.getSize(paint, "x", 0, 1, fm) }
+        assertEquals("row height must not creep", ascent, fm.ascent)
+        assertEquals("row height must not creep", descent, fm.descent)
+    }
+
+    @Test
+    fun `an image reports the same height however often it is measured`() {
+        val span = ImageSpan(null, 600, "alt", broken = false, bodyPx = 40f)
+        val paint = TextPaint().apply { textSize = 40f }
+        val fm = android.graphics.Paint.FontMetricsInt()
+
+        span.getSize(paint, "x", 0, 1, fm)
+        val ascent = fm.ascent
+        repeat(5) { span.getSize(paint, "x", 0, 1, fm) }
+        assertEquals(ascent, fm.ascent)
+    }
+
     // ---------------------------------------------------------------- images
 
     @Test

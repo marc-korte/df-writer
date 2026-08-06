@@ -367,6 +367,12 @@ class MarkdownEditor @JvmOverloads constructor(
             styling = false
         }
         rememberCaretLine()
+        // Not just invalidate. Several of these spans change how tall a line is
+        // — an image, a table row, the space above a heading — and only some
+        // span types make DynamicLayout reflow on their own. Without an explicit
+        // pass the old heights survive while the new spans draw, which puts the
+        // text of one line on top of another.
+        requestLayout()
         invalidate()
     }
 
@@ -402,6 +408,9 @@ class MarkdownEditor @JvmOverloads constructor(
 
         if (prefs.typewriterMode) post { centreCaret() }
         onCaretMoved?.invoke()
+        // Moving between lines swaps a rendered table row or image for its
+        // source and back, which changes that line's height.
+        if (movedLine) requestLayout()
         invalidate()
     }
 
