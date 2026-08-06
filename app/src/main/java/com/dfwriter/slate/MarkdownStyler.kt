@@ -165,14 +165,23 @@ class MarkdownStyler(private val prefs: Prefs) {
             val task = TASK.find(text.subSequence(markEnd, le).toString())
             val ordered = list.groupValues[2].firstOrNull()?.isDigit() == true
 
-            if (reveal) {
-                text.setSpan(MarkerSpan(), markerStart, markEnd, EX)
-            } else if (ordered) {
+            // Leading whitespace is collapsed in both states: the hanging
+            // indent already positions the line, and showing the literal spaces
+            // as well would indent it twice and shift it as the caret arrives.
+            if (markerStart > content) text.setSpan(HiddenSpan(), content, markerStart, EX)
+
+            if (ordered) {
                 // Keep the number, quieten the delimiter and the trailing space.
                 text.setSpan(MarkerSpan(), markerStart + list.groupValues[2].length - 1, markEnd, EX)
             } else {
-                text.setSpan(GlyphSpan(bulletFor(depth)), markerStart, markEnd, EX)
-                if (markerStart > content) text.setSpan(HiddenSpan(), content, markerStart, EX)
+                // Revealed or not, the marker occupies one bullet's width, so
+                // the text after it never moves.
+                val marker = text.subSequence(markerStart, markEnd).toString()
+                text.setSpan(
+                    if (reveal) GlyphSpan(marker.trimEnd(), 1.6f, Ink.MARKER)
+                    else GlyphSpan(bulletFor(depth)),
+                    markerStart, markEnd, EX
+                )
             }
 
             if (task != null) {

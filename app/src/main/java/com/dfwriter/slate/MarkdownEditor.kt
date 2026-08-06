@@ -12,6 +12,7 @@ import android.text.TextWatcher
 import android.util.AttributeSet
 import android.view.KeyEvent
 import android.view.View
+import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import kotlin.math.max
 import kotlin.math.min
@@ -86,6 +87,48 @@ class MarkdownEditor @JvmOverloads constructor(
         })
 
         applyMetrics()
+    }
+
+    // ------------------------------------------------------- on-screen keys
+
+    /** True when a physical keyboard is attached and usable right now. */
+    fun hasHardwareKeyboard(): Boolean {
+        val cfg = resources.configuration
+        return cfg.keyboard == android.content.res.Configuration.KEYBOARD_QWERTY &&
+                cfg.hardKeyboardHidden == android.content.res.Configuration.HARDKEYBOARDHIDDEN_NO
+    }
+
+    /**
+     * This device sets `show_ime_with_hard_keyboard`, so Android puts the
+     * on-screen keyboard up even while you type on Bluetooth, covering nearly
+     * half the panel. That is a system-wide setting and not ours to change, so
+     * the IME is suppressed per-view instead.
+     */
+    fun applySoftInputPolicy() {
+        if (!::prefs.isInitialized) return
+        val wanted = when (prefs.softKeyboard) {
+            SoftKeyboard.ALWAYS -> true
+            SoftKeyboard.NEVER -> false
+            SoftKeyboard.AUTO -> !hasHardwareKeyboard()
+        }
+        showSoftInputOnFocus = wanted
+        // Setting the flag only affects the *next* focus event. If the keyboard
+        // has just been unpaired the editor is already focused, so without this
+        // there would be no hardware keyboard and no on-screen one either, and
+        // no way left to type.
+        if (!wanted) hideIme() else if (isFocused) showIme()
+    }
+
+    private fun imm(): InputMethodManager =
+        context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+
+    fun hideIme() {
+        windowToken?.let { imm().hideSoftInputFromWindow(it, 0) }
+    }
+
+    fun showIme() {
+        requestFocus()
+        imm().showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
     }
 
     // ---------------------------------------------------------- undo history
@@ -173,6 +216,7 @@ class MarkdownEditor @JvmOverloads constructor(
         setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, Scale.pt(prefs.bodyPt))
         setLineSpacing(0f, prefs.lineSpacing)
         caretPaint.color = Ink.TEXT
+        applySoftInputPolicy()
         requestLayout()
         layoutColumn()
         restyleNow()

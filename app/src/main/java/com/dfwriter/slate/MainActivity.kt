@@ -80,6 +80,19 @@ class MainActivity : Activity() {
         ui.postDelayed(autosave, 4000)
     }
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Pairing or dropping the Bluetooth keyboard arrives here, and decides
+        // whether the on-screen keyboard should be allowed up.
+        editor.applySoftInputPolicy()
+        editor.post { editor.applyMetrics() }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        editor.applySoftInputPolicy()
+    }
+
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         intent?.let { openFromIntent(it) }
@@ -128,15 +141,27 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.WHITE)
             setPadding(Scale.mmInt(5f), Scale.mmInt(1.4f), Scale.mmInt(5f), Scale.mmInt(1.8f))
         }
+        // The whole bar is a target for the command palette. Without it the app
+        // is unusable whenever the Bluetooth keyboard is not paired, since every
+        // other route in is a chord.
+        statusBar.isClickable = true
+        statusBar.setOnClickListener { if (sheetsOpen()) closeSheets() else showPalette() }
+
         statusLeft = Ui.text(this, prefs.bodyPt * 0.76f, color = Ink.RULE)
         statusRight = Ui.text(this, prefs.bodyPt * 0.76f, color = Ink.RULE)
-        statusRight.gravity = Gravity.END
-        statusBar.addView(
-            statusLeft, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        )
-        statusBar.addView(
-            statusRight, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        )
+        val fill = { LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
+        // The menu affordance sits on the side the writing hand is already on.
+        if (prefs.leftHanded) {
+            statusLeft.gravity = Gravity.START
+            statusRight.gravity = Gravity.END
+            statusBar.addView(statusLeft, fill())
+            statusBar.addView(statusRight, fill())
+        } else {
+            statusRight.gravity = Gravity.START
+            statusLeft.gravity = Gravity.END
+            statusBar.addView(statusRight, fill())
+            statusBar.addView(statusLeft, fill())
+        }
         main.addView(Ui.divider(this, 0xFFE0E0E0.toInt()))
         main.addView(statusBar)
 
@@ -205,11 +230,29 @@ class MainActivity : Activity() {
                 )
     }
 
+    private fun setHandedness(left: Boolean) {
+        prefs.leftHanded = left
+        // The status bar and the stepper rows are built mirrored, so the view
+        // tree has to be rebuilt for the change to show.
+        ui.post {
+            rebuildChrome()
+            flash(if (left) "Left-handed layout" else "Right-handed layout")
+        }
+    }
+
+    private fun setOrientation(o: Orientation) {
+        prefs.orientation = o
+        applyOrientation()
+        flash("Screen: ${o.name.lowercase()}")
+    }
+
     private fun applyOrientation() {
         requestedOrientation = when (prefs.orientation) {
             Orientation.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
             Orientation.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            Orientation.AUTO -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            // USER, not UNSPECIFIED: it follows the device's own auto-rotate
+            // switch, so turning the Manta over turns the page over with it.
+            Orientation.AUTO -> ActivityInfo.SCREEN_ORIENTATION_USER
         }
     }
 
@@ -488,7 +531,28 @@ class MainActivity : Activity() {
         SettingsSheet.Row(
             "Status bar",
             { onOff(prefs.showStatusBar) },
-            { prefs.showStatusBar = !prefs.showStatusBar }
+            { prefs.showStatusBar = !prefs.showStatusBar },
+            "tap it for the palette"
+        ),
+        SettingsSheet.Row(
+            "Handedness",
+            { if (prefs.leftHanded) "left" else "right" },
+            // Must go through setHandedness: the status bar is mirrored at build
+            // time, so flipping the flag alone would leave the stepper rows and
+            // the status bar disagreeing until something else rebuilt the tree.
+            { setHandedness(!prefs.leftHanded) },
+            "which side the controls sit on"
+        ),
+        SettingsSheet.Row(
+            "On-screen keyboard",
+            { prefs.softKeyboard.name.lowercase() },
+            { d ->
+                val v = SoftKeyboard.values()
+                prefs.softKeyboard =
+                    v[((prefs.softKeyboard.ordinal + d) % v.size + v.size) % v.size]
+                editor.applySoftInputPolicy()
+            },
+            "auto hides it for Bluetooth"
         ),
         SettingsSheet.Row(
             "Auto screen refresh",
@@ -565,6 +629,28 @@ class MainActivity : Activity() {
             val v = Orientation.values()
             prefs.orientation = v[(prefs.orientation.ordinal + 1) % v.size]
             applyOrientation()
+            flash("Screen: ${prefs.orientation.name.lowercase()}")
+        },
+        Cmd("Switch to left-handed layout", "") { setHandedness(true) },
+        Cmd("Switch to right-handed layout", "") { setHandedness(false) },
+        Cmd("Screen: landscape", "") { setOrientation(Orientation.LANDSCAPE) },
+        Cmd("Screen: portrait", "") { setOrientation(Orientation.PORTRAIT) },
+        Cmd("Screen: follow the system", "") { setOrientation(Orientation.AUTO) },
+        Cmd("Show the on-screen keyboard", "") {
+            prefs.softKeyboard = SoftKeyboard.ALWAYS
+            editor.applySoftInputPolicy()
+            editor.showIme()
+            flash("On-screen keyboard: always")
+        },
+        Cmd("Hide the on-screen keyboard", "") {
+            prefs.softKeyboard = SoftKeyboard.NEVER
+            editor.applySoftInputPolicy()
+            flash("On-screen keyboard: never")
+        },
+        Cmd("On-screen keyboard follows the hardware", "") {
+            prefs.softKeyboard = SoftKeyboard.AUTO
+            editor.applySoftInputPolicy()
+            flash("On-screen keyboard: auto")
         },
         Cmd("Bigger interface", "Ctrl =") { nudgeScale(1) },
         Cmd("Smaller interface", "Ctrl -") { nudgeScale(-1) },
@@ -791,7 +877,7 @@ class MainActivity : Activity() {
         if (!prefs.showStatusBar) return
         val name = store.current?.name ?: "untitled"
         val dot = if (store.dirty) " •" else ""
-        statusLeft.text = statusMessage ?: "$name$dot"
+        statusLeft.text = statusMessage ?: "☰  $name$dot"
 
         val words = DocStore.countWords(editor.text)
         val modes = buildString {

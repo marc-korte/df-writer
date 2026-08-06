@@ -7,6 +7,13 @@ enum class Orientation { LANDSCAPE, PORTRAIT, AUTO }
 
 enum class SerifChoice { SERIF, SANS, MONO }
 
+/**
+ * AUTO hides the on-screen keyboard whenever a physical one is attached. It is
+ * the default because this device forces `show_ime_with_hard_keyboard`, so
+ * without it the IME covers half the panel even while typing over Bluetooth.
+ */
+enum class SoftKeyboard { AUTO, NEVER, ALWAYS }
+
 class Prefs(ctx: Context) {
 
     private val sp: SharedPreferences =
@@ -52,10 +59,31 @@ class Prefs(ctx: Context) {
         get() = sp.getBoolean("sourceMode", false)
         set(v) = sp.edit().putBoolean("sourceMode", v).apply()
 
+    /**
+     * Defaults to AUTO so that physically turning the device works. Pinning the
+     * app to landscape makes it the sole source of the display's orientation,
+     * which silently disables the Manta's own rotation — it does have a working
+     * accelerometer, contrary to the assumption this app was first built on.
+     */
     var orientation: Orientation
-        get() = runCatching { Orientation.valueOf(sp.getString("orientation", "LANDSCAPE")!!) }
-            .getOrDefault(Orientation.LANDSCAPE)
+        get() = runCatching { Orientation.valueOf(sp.getString("orientation", "AUTO")!!) }
+            .getOrDefault(Orientation.AUTO)
         set(v) = sp.edit().putString("orientation", v.name).apply()
+
+    var softKeyboard: SoftKeyboard
+        get() = runCatching { SoftKeyboard.valueOf(sp.getString("softKeyboard", "AUTO")!!) }
+            .getOrDefault(SoftKeyboard.AUTO)
+        set(v) = sp.edit().putString("softKeyboard", v.name).apply()
+
+    /**
+     * Mirrors the controls to the side the writing hand is not covering. The
+     * device's own handedness setting is not readable by third-party apps — it
+     * is not in system, secure or global settings, nor in any property — so
+     * Slate keeps its own.
+     */
+    var leftHanded: Boolean
+        get() = sp.getBoolean("leftHanded", true)
+        set(v) = sp.edit().putBoolean("leftHanded", v).apply()
 
     var showStatusBar: Boolean
         get() = sp.getBoolean("showStatusBar", true)

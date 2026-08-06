@@ -171,18 +171,31 @@ class HangingIndentSpan(private val first: Int, private val rest: Int) :
  * Draws a glyph in place of a list marker while reserving the marker's width,
  * so `- ` reads as a real bullet without the file ever containing one.
  */
-class GlyphSpan(private val glyph: String, private val widthEm: Float = 1.6f) :
-    ReplacementSpan(), SlateSpan {
+class GlyphSpan(
+    private val glyph: String,
+    private val widthEm: Float = 1.6f,
+    private val color: Int? = null
+) : ReplacementSpan(), SlateSpan {
 
+    /**
+     * Always reserves the same width, whether it is drawing a bullet or the raw
+     * `- ` revealed under the caret. If the two differed, every line would jump
+     * sideways as the caret arrived — on E Ink, a full repaint of that line for
+     * no reason.
+     */
     override fun getSize(
         paint: Paint, text: CharSequence, start: Int, end: Int, fm: Paint.FontMetricsInt?
-    ): Int = Math.round(paint.textSize * widthEm)
+    ): Int = Math.max(
+        Math.round(paint.textSize * widthEm),
+        Math.round(paint.measureText(glyph))
+    )
 
     override fun draw(
         canvas: Canvas, text: CharSequence, start: Int, end: Int,
         x: Float, top: Int, y: Int, bottom: Int, paint: Paint
     ) {
         val old = paint.color
+        if (color != null) paint.color = color
         canvas.drawText(glyph, x, y.toFloat(), paint)
         paint.color = old
     }

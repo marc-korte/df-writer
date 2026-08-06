@@ -53,9 +53,19 @@ your eyes, two keystrokes fix it permanently.
   make an E Ink controller do a full update and clear accumulated ghosting.
   There is also an automatic flash after a configurable number of edits, when
   you pause typing.
-- **Landscape by default**, since the folio-as-stand position is the point.
-  Cycle with **Ctrl Shift R** — E Ink tablets usually have no accelerometer, so
-  this is an explicit setting rather than auto-rotate.
+- **Rotation follows the device.** The Manta has a working accelerometer and
+  auto-rotate, so Slate leaves rotation alone by default and turning the tablet
+  turns the page. Pin it with **Ctrl Shift R** or the palette when you want it
+  fixed in the folio-as-stand position.
+- **The on-screen keyboard stays out of the way.** This device forces
+  `show_ime_with_hard_keyboard`, so Android would otherwise put the IME up over
+  half the panel even while you type on Bluetooth. Slate suppresses it whenever
+  a hardware keyboard is attached, and brings it back when there isn't one.
+- **Left- or right-handed.** The device's own handedness setting is not readable
+  by third-party apps, so Slate has its own; controls sit on the side your
+  writing hand is already on. Defaults to left-handed.
+- **Not keyboard-only.** Tapping the status bar opens the command palette, so
+  everything is reachable when the keyboard is not paired.
 - **Zero third-party dependencies.** No AndroidX, no Compose, no Play Services.
   Framework views start faster and repaint more predictably, and the APK is
   683 KB.

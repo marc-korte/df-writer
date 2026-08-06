@@ -99,9 +99,17 @@ class SettingsSheet(ctx: Context, private val prefs: Prefs) : LinearLayout(ctx) 
             Ui.tagColor(value)
             val plus = stepper("+") { r.adjust(1); onChanged?.invoke(); rebuild() }
 
-            row.addView(minus)
-            row.addView(value)
-            row.addView(plus)
+            // Left-handed: the steppers move to the near side so the writing
+            // hand is not reaching across the page to press them.
+            if (prefs.leftHanded) {
+                row.addView(minus, 0)
+                row.addView(value, 1)
+                row.addView(plus, 2)
+            } else {
+                row.addView(minus)
+                row.addView(value)
+                row.addView(plus)
+            }
 
             row.setOnClickListener { selected = i; applySelection() }
             list.addView(row)
