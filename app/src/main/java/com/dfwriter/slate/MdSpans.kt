@@ -213,6 +213,229 @@ class GlyphSpan(
     }
 }
 
+/**
+ * Draws a picture in place of its `![alt](path)` source. Until the decode
+ * finishes — or if it never can — it draws a labelled frame the same shape, so
+ * the page does not jump when the image arrives.
+ */
+class ImageSpan(
+    private val bitmap: android.graphics.Bitmap?,
+    private val maxWidth: Int,
+    private val alt: String,
+    private val broken: Boolean,
+    private val bodyPx: Float
+) : ReplacementSpan(), SlateSpan {
+
+    private fun drawnWidth(): Int =
+        if (bitmap != null) minOf(bitmap.width, maxWidth) else maxWidth
+
+    private fun drawnHeight(): Int = if (bitmap != null) {
+        val w = drawnWidth()
+        Math.max(1, Math.round(bitmap.height * (w.toFloat() / bitmap.width)))
+    } else {
+        Math.round(bodyPx * 3f)
+    }
+
+    override fun getSize(
+        paint: Paint, text: CharSequence, start: Int, end: Int, fm: Paint.FontMetricsInt?
+    ): Int {
+        val h = drawnHeight()
+        if (fm != null) {
+            // The whole picture hangs above the baseline, with a little air.
+            val pad = Math.round(bodyPx * 0.35f)
+            fm.ascent = -h - pad
+            fm.top = fm.ascent
+            fm.descent = pad
+            fm.bottom = fm.descent
+        }
+        return drawnWidth()
+    }
+
+    override fun draw(
+        canvas: Canvas, text: CharSequence, start: Int, end: Int,
+        x: Float, top: Int, y: Int, bottom: Int, paint: Paint
+    ) {
+        val w = drawnWidth()
+        val h = drawnHeight()
+        val pad = Math.round(bodyPx * 0.35f)
+        val t = (y - h - pad).toFloat()
+
+        if (bitmap != null) {
+            val dst = android.graphics.RectF(x, t, x + w, t + h)
+            canvas.drawBitmap(bitmap, null, dst, null)
+            return
+        }
+
+        val old = paint.color
+        val oldStyle = paint.style
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = Math.max(1f, bodyPx * 0.06f)
+        paint.color = Ink.RULE
+        canvas.drawRect(x, t, x + w, t + h, paint)
+
+        paint.style = Paint.Style.FILL
+        paint.color = if (broken) Ink.RULE else Ink.MARKER
+        val label = when {
+            broken && alt.isNotBlank() -> "$alt — image not found"
+            broken -> "image not found"
+            alt.isNotBlank() -> alt
+            else -> "loading…"
+        }
+        val size = paint.textSize
+        paint.textSize = bodyPx * 0.8f
+        canvas.drawText(label, x + bodyPx * 0.5f, t + h / 2f, paint)
+        paint.textSize = size
+
+        paint.color = old
+        paint.style = oldStyle
+    }
+}
+
+/**
+ * A whole rendered table row, drawn in place of its pipe syntax.
+ *
+ * One span per row rather than one per cell: a cell can be empty, and a
+ * zero-length span cannot be attached, so per-cell spans would fail on exactly
+ * the tables people write by hand. This also draws the column rules, which keeps
+ * the grid aligned with the text that sits inside it.
+ */
+class TableRowSpan(
+    private val cells: List<String>,
+    private val widths: IntArray,
+    private val aligns: IntArray,
+    private val header: Boolean,
+    private val pad: Float,
+    private val rule: Int,
+    private val firstRow: Boolean,
+    private val lastRow: Boolean
+) : ReplacementSpan(), SlateSpan {
+
+    private fun total(): Int = widths.sum()
+
+    override fun getSize(
+        paint: Paint, text: CharSequence, start: Int, end: Int, fm: Paint.FontMetricsInt?
+    ): Int {
+        if (fm != null) {
+            val extra = Math.round(pad)
+            fm.ascent -= extra
+            fm.top = fm.ascent
+            fm.descent += extra
+            fm.bottom = fm.descent
+        }
+        return total()
+    }
+
+    override fun draw(
+        canvas: Canvas, text: CharSequence, start: Int, end: Int,
+        x: Float, top: Int, y: Int, bottom: Int, paint: Paint
+    ) {
+        val face = paint.typeface
+        val oldColour = paint.color
+        val oldStyle = paint.style
+
+        // Rules first, so text sits on top of them.
+        paint.style = Paint.Style.FILL
+        paint.color = Ink.RULE
+        var edge = x
+        for (w in widths) {
+            canvas.drawRect(edge, top.toFloat(), edge + rule, bottom.toFloat(), paint)
+            edge += w
+        }
+        canvas.drawRect(edge - rule, top.toFloat(), edge, bottom.toFloat(), paint)
+        if (firstRow) {
+            canvas.drawRect(x, top.toFloat(), edge, top + rule.toFloat(), paint)
+        }
+        if (lastRow) {
+            canvas.drawRect(x, bottom - rule.toFloat(), edge, bottom.toFloat(), paint)
+        }
+
+        paint.color = oldColour
+        if (header) paint.typeface = Typeface.create(face ?: Typeface.DEFAULT, Typeface.BOLD)
+
+        var cx = x
+        for (i in widths.indices) {
+            val w = widths[i]
+            val label = cells.getOrElse(i) { "" }
+            if (label.isNotEmpty()) {
+                val avail = w - pad * 2
+                val shown = ellipsise(label, paint, avail)
+                val tw = paint.measureText(shown)
+                val dx = when (aligns.getOrElse(i) { ALIGN_LEFT }) {
+                    ALIGN_RIGHT -> w - pad - tw
+                    ALIGN_CENTER -> (w - tw) / 2f
+                    else -> pad
+                }
+                canvas.drawText(shown, cx + dx, y.toFloat(), paint)
+            }
+            cx += w
+        }
+
+        paint.typeface = face
+        paint.style = oldStyle
+    }
+
+    private fun ellipsise(s: String, paint: Paint, avail: Float): String {
+        if (avail <= 0f) return ""
+        if (paint.measureText(s) <= avail) return s
+        var n = s.length
+        while (n > 0 && paint.measureText(s.substring(0, n) + "…") > avail) n--
+        return if (n <= 0) "" else s.substring(0, n) + "…"
+    }
+
+    companion object {
+        const val ALIGN_LEFT = 0
+        const val ALIGN_CENTER = 1
+        const val ALIGN_RIGHT = 2
+    }
+}
+
+/**
+ * Collapses a table's `| --- | --- |` row to the rule under the header. The row
+ * still exists in the file; it just stops taking a line's worth of height.
+ */
+class TableDividerSpan(
+    private val widths: IntArray,
+    private val rule: Int
+) : ReplacementSpan(), SlateSpan {
+
+    override fun getSize(
+        paint: Paint, text: CharSequence, start: Int, end: Int, fm: Paint.FontMetricsInt?
+    ): Int {
+        if (fm != null) {
+            val h = rule * 3
+            fm.ascent = -h
+            fm.top = fm.ascent
+            fm.descent = 0
+            fm.bottom = 0
+        }
+        return widths.sum()
+    }
+
+    override fun draw(
+        canvas: Canvas, text: CharSequence, start: Int, end: Int,
+        x: Float, top: Int, y: Int, bottom: Int, paint: Paint
+    ) {
+        val old = paint.color
+        val oldStyle = paint.style
+        paint.style = Paint.Style.FILL
+        paint.color = Ink.TEXT
+
+        val width = widths.sum()
+        canvas.drawRect(x, top.toFloat(), x + width, top + rule * 1.6f, paint)
+
+        paint.color = Ink.RULE
+        var edge = x
+        for (w in widths) {
+            canvas.drawRect(edge, top.toFloat(), edge + rule, bottom.toFloat(), paint)
+            edge += w
+        }
+        canvas.drawRect(edge - rule, top.toFloat(), edge, bottom.toFloat(), paint)
+
+        paint.color = old
+        paint.style = oldStyle
+    }
+}
+
 /** Extra breathing room above a block, in the spirit of Typora's spacing. */
 class SpaceAboveSpan(private val px: Int) : android.text.style.LineHeightSpan, SlateSpan {
     override fun chooseHeight(

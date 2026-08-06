@@ -152,8 +152,23 @@ memorising.
 
 Headings, bold, italic, bold-italic, strikethrough, highlight, inline code,
 fenced code blocks with language tags, blockquotes, nested bullet and numbered
-lists, task lists with real checkboxes, links, images, horizontal rules and
-pipe tables.
+lists, task lists with real checkboxes, links, horizontal rules, and — rendered
+live in the editor rather than only on export — **tables and images**.
+
+A table is drawn as a real grid: columns sized to their contents and then scaled
+to the text measure, header in bold, alignment taken from the `:---` markers,
+and the `| --- |` row collapsed into the rule beneath the header. Put the caret
+on any row and that row alone turns back into pipes so you can edit it, exactly
+as the syntax markers do everywhere else. The file on disk is never anything but
+plain Markdown.
+
+Images are drawn in place of their `![alt](path)` source, at their own size up
+to the width of the text column. Paths resolve relative to the document's own
+folder. Decoding happens on a background thread into a size-bounded cache, so
+neither styling nor drawing ever touches the disk; until a picture is ready, and
+if it turns out to be missing, its place is held by a labelled frame rather than
+a gap. Remote URLs are deliberately not fetched — the app holds no network
+permission and a writing tool should not stall on a download.
 
 Files autosave every few seconds and again whenever the app is backgrounded,
 written via a temporary file and a rename so a crash mid-write cannot truncate a
@@ -188,7 +203,7 @@ your own key instead, copy `keystore.properties.example` to
 
 ### Tests
 
-106 tests, all passing. They cover the parts that would otherwise fail silently:
+123 tests, all passing. They cover the parts that would otherwise fail silently:
 
 - **`PureLogicTest`** — the density decision against a truthful Manta, a Manta
   reporting a false 160 dpi, garbage metrics and an ordinary high-density phone;
@@ -217,6 +232,11 @@ your own key instead, copy `keystore.properties.example` to
 - **`RecoveryTest`** — starting up after text failed to reach disk, driven from
   the outside: arrange the leftovers, start the app, check what it offers and
   that restoring writes through.
+- **`TableImageTest`** — table detection, column arithmetic, alignment markers,
+  empty cells, pipes that are not a table, the caret revealing one row while the
+  rest stay a grid, and every caret position in a table; plus image path
+  resolution, a real decode off the main thread, and a missing file being
+  reported rather than going blank.
 - **`ActivityStartupTest`** — that the app actually starts and survives a full
   lifecycle round trip.
 

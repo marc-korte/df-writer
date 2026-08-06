@@ -42,6 +42,15 @@ class MarkdownEditor @JvmOverloads constructor(
         this.prefs = prefs
         this.styler = styler
 
+        // A picture that has finished decoding needs the line it sits on to be
+        // measured again, which only a restyle will do.
+        styler.onImageReady = {
+            if (isAttachedToWindow) {
+                restyleNow()
+                requestLayout()
+            }
+        }
+
         background = null
         setPadding(0, 0, 0, 0)
         gravity = android.view.Gravity.TOP or android.view.Gravity.START
@@ -308,6 +317,18 @@ class MarkdownEditor @JvmOverloads constructor(
         val top = Scale.ptInt(26f)
         val bottom = if (prefs.typewriterMode) (height / 2) else Scale.ptInt(48f)
         setPadding(side, top, side, max(bottom, Scale.ptInt(48f)))
+
+        // Tables and images are laid out against the text column, so the styler
+        // needs to know how wide it ended up. The first styling pass happens
+        // before this view has ever been measured, so the width arrives late and
+        // anything sized against it has to be styled again once it does.
+        styler.measure = paint
+        val column = (w - side * 2).coerceAtLeast(0)
+        if (column != styler.contentWidthPx) {
+            styler.contentWidthPx = column
+            // Posted: restyling from inside a layout pass would re-enter layout.
+            post { if (isAttachedToWindow) restyleNow() }
+        }
     }
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {

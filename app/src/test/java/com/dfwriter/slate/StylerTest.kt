@@ -30,6 +30,9 @@ class StylerTest {
         Scale.init(ctx, prefs)
         styler = MarkdownStyler(prefs)
         styler.overrideBodyPx = 40f
+        // Tables and images are laid out against the text column.
+        styler.contentWidthPx = 1200
+        styler.measure = android.text.TextPaint().apply { textSize = 40f }
     }
 
     private fun style(src: String, caret: Int = -1): SpannableStringBuilder {

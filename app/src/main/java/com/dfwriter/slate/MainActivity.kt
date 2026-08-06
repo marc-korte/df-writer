@@ -387,6 +387,10 @@ class MainActivity : Activity() {
             flash("Could not read ${f.name}")
             return
         }
+        // Relative image paths are resolved against the document's own folder,
+        // and a file that was missing last time may exist now.
+        styler.documentDir = f.parentFile
+        ImageCache.retryBroken()
         editor.setText(body)
         editor.restyleNow()
         editor.setSelection(0)

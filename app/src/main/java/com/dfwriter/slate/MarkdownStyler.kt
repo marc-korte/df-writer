@@ -27,6 +27,18 @@ class MarkdownStyler(private val prefs: Prefs) {
     /** Set by the exporter to conceal markers regardless of the live preference. */
     var forceHideMarkers: Boolean? = null
 
+    /** Width of the text column in pixels, used to lay out tables and images. */
+    var contentWidthPx: Int = 0
+
+    /** Folder of the open document, for resolving relative image paths. */
+    var documentDir: java.io.File? = null
+
+    /** Measures cell text so table columns can be sized. */
+    var measure: android.text.TextPaint? = null
+
+    /** Invoked when an image finishes decoding and the view should restyle. */
+    var onImageReady: (() -> Unit)? = null
+
     private val headingRatio = floatArrayOf(1.80f, 1.50f, 1.28f, 1.14f, 1.02f, 0.96f)
 
     private var hideEnabled = true
@@ -53,6 +65,11 @@ class MarkdownStyler(private val prefs: Prefs) {
         // A fence delimiter anywhere in the touched range flips the meaning of
         // every following line, so widen to the end of the document.
         if (rangeTouchesFence(text, s, e)) e = len
+
+        // Editing one cell changes every column width, so a table is restyled
+        // whole or not at all.
+        tableAt(text, s)?.let { s = minOf(s, it.start) }
+        tableAt(text, e)?.let { e = maxOf(e, it.end) }
 
         clearSlateSpans(text, s, e)
         var inFence = fenceStateAt(text, s)
@@ -108,6 +125,14 @@ class MarkdownStyler(private val prefs: Prefs) {
             paint(text, ls, le, CodeBlockSpan(0, ruleWidth()))
             if (le > ls) text.setSpan(MonoSpan(), ls, le, EX)
             return true
+        }
+
+        // --- tables -------------------------------------------------------
+        // Rendered only when the caret is elsewhere. On the caret's own line the
+        // raw pipes come back, which is what makes the table editable at all.
+        if (!reveal && line.contains('|')) {
+            val table = tableAt(text, ls)
+            if (table != null && styleTableLine(text, ls, le, table)) return false
         }
 
         // --- horizontal rule --------------------------------------------
@@ -219,10 +244,27 @@ class MarkdownStyler(private val prefs: Prefs) {
             markerRun(text, en - ticks, en, reveal)
         }
         apply(from, s, claimed, IMAGE) { st, en, m ->
-            val altLen = m.groupValues[1].length
-            text.setSpan(LinkTextSpan(), st + 2, st + 2 + altLen, EX)
+            val alt = m.groupValues[1]
+            if (!reveal && contentWidthPx > 0) {
+                val file = ImageCache.resolve(m.groupValues[2], documentDir)
+                if (file != null) {
+                    val bmp = ImageCache.peek(file, contentWidthPx)
+                    if (bmp == null && !ImageCache.isBroken(file, contentWidthPx)) {
+                        ImageCache.request(file, contentWidthPx) { onImageReady?.invoke() }
+                    }
+                    text.setSpan(
+                        ImageSpan(
+                            bmp, contentWidthPx, alt,
+                            ImageCache.isBroken(file, contentWidthPx), bodyPx
+                        ),
+                        st, en, EX
+                    )
+                    return@apply
+                }
+            }
+            text.setSpan(LinkTextSpan(), st + 2, st + 2 + alt.length, EX)
             markerRun(text, st, st + 2, reveal)
-            markerRun(text, st + 2 + altLen, en, reveal)
+            markerRun(text, st + 2 + alt.length, en, reveal)
         }
         apply(from, s, claimed, LINK) { st, en, m ->
             val textLen = m.groupValues[1].length
@@ -276,6 +318,175 @@ class MarkdownStyler(private val prefs: Prefs) {
     }
 
     // --------------------------------------------------------------- outline
+
+    // --------------------------------------------------------------- tables
+
+    /** A contiguous run of pipe rows whose second line is the delimiter row. */
+    class Table(
+        val start: Int,
+        val end: Int,
+        val lineStarts: List<Int>,
+        val widths: IntArray,
+        val aligns: IntArray
+    )
+
+    /**
+     * The table containing [offset], or null. Scans out from the line in both
+     * directions, so it works whether styling starts at the top of the block or
+     * in the middle of it after a single keystroke.
+     */
+    fun tableAt(text: CharSequence, offset: Int): Table? {
+        val len = text.length
+        if (len == 0 || offset > len) return null
+        var ls = lineStartOf(text, offset.coerceIn(0, len))
+        if (!looksLikeRow(text, ls)) return null
+
+        // Walk back to the first row of the run.
+        while (ls > 0) {
+            val prev = lineStartOf(text, ls - 1)
+            if (!looksLikeRow(text, prev)) break
+            ls = prev
+        }
+        val starts = ArrayList<Int>()
+        var i = ls
+        while (i <= len && looksLikeRow(text, i)) {
+            starts.add(i)
+            val le = lineEndOf(text, i)
+            if (le >= len) break
+            i = le + 1
+        }
+        if (starts.size < 2) return null
+
+        val delim = lineText(text, starts[1])
+        if (!DELIMITER_ROW.matches(delim.trim())) return null
+
+        val aligns = alignmentsOf(delim)
+        val columns = maxOf(aligns.size, cellsOf(lineText(text, starts[0])).size)
+        if (columns == 0) return null
+
+        val widths = columnWidths(text, starts, columns)
+        val end = lineEndOf(text, starts.last())
+        return Table(starts.first(), end, starts, widths, padAligns(aligns, columns))
+    }
+
+    private fun looksLikeRow(text: CharSequence, lineStart: Int): Boolean {
+        if (lineStart >= text.length) return false
+        val le = lineEndOf(text, lineStart)
+        if (le <= lineStart) return false
+        var i = lineStart
+        var pipe = false
+        while (i < le) {
+            if (text[i] == '|') pipe = true
+            i++
+        }
+        return pipe
+    }
+
+    private fun lineText(text: CharSequence, lineStart: Int): String =
+        text.subSequence(lineStart, lineEndOf(text, lineStart)).toString()
+
+    /** Splits a row into cell texts, ignoring the outer pipes if present. */
+    private fun cellsOf(line: String): List<String> {
+        var s = line.trim()
+        if (s.startsWith("|")) s = s.substring(1)
+        if (s.endsWith("|") && s.isNotEmpty()) s = s.substring(0, s.length - 1)
+        if (s.isEmpty()) return listOf("")
+        return s.split('|').map { stripInline(it.trim()) }
+    }
+
+    /** Cells show their text, not their markup; the styling itself is not nested. */
+    private fun stripInline(s: String): String = s
+        .replace(Regex("\\*\\*(.+?)\\*\\*"), "$1")
+        .replace(Regex("(?<![A-Za-z0-9_])__(.+?)__(?![A-Za-z0-9_])"), "$1")
+        .replace(Regex("\\*(.+?)\\*"), "$1")
+        .replace(Regex("`(.+?)`"), "$1")
+        .replace(Regex("~~(.+?)~~"), "$1")
+        .replace(Regex("\\[([^\\]]*)]\\([^)]*\\)"), "$1")
+
+    private fun alignmentsOf(delim: String): IntArray =
+        cellsOf(delim).map {
+            val t = it.trim()
+            when {
+                t.startsWith(":") && t.endsWith(":") -> TableRowSpan.ALIGN_CENTER
+                t.endsWith(":") -> TableRowSpan.ALIGN_RIGHT
+                else -> TableRowSpan.ALIGN_LEFT
+            }
+        }.toIntArray()
+
+    private fun padAligns(a: IntArray, columns: Int): IntArray =
+        IntArray(columns) { a.getOrElse(it) { TableRowSpan.ALIGN_LEFT } }
+
+    /**
+     * Columns take their natural width where they fit, then the whole table is
+     * scaled to the text column so it lines up with the prose around it.
+     */
+    private fun columnWidths(
+        text: CharSequence, lineStarts: List<Int>, columns: Int
+    ): IntArray {
+        val paint = measure
+        val pad = tableCellPad()
+        val natural = FloatArray(columns) { 0f }
+
+        for ((row, ls) in lineStarts.withIndex()) {
+            if (row == 1) continue                       // the delimiter row
+            val cells = cellsOf(lineText(text, ls))
+            for (c in 0 until columns) {
+                val s = cells.getOrElse(c) { "" }
+                val w = if (paint != null) paint.measureText(s) else s.length * bodyPx * 0.5f
+                // The header is drawn bold, which is a little wider.
+                val weighted = if (row == 0) w * 1.08f else w
+                if (weighted > natural[c]) natural[c] = weighted
+            }
+        }
+
+        val avail = (contentWidthPx.takeIf { it > 0 } ?: Math.round(bodyPx * 30)).toFloat()
+        val minCell = bodyPx * 1.6f + pad * 2
+        var total = 0f
+        for (c in 0 until columns) {
+            natural[c] = maxOf(natural[c] + pad * 2, minCell)
+            total += natural[c]
+        }
+        if (total <= 0f) return IntArray(columns) { Math.round(avail / columns) }
+
+        val scale = avail / total
+        val out = IntArray(columns)
+        var used = 0
+        for (c in 0 until columns) {
+            out[c] = Math.max(1, Math.round(natural[c] * scale))
+            used += out[c]
+        }
+        // Absorb the rounding drift into the last column so the grid closes.
+        out[columns - 1] += Math.round(avail) - used
+        if (out[columns - 1] < 1) out[columns - 1] = 1
+        return out
+    }
+
+    private fun tableCellPad(): Float = bodyPx * 0.45f
+
+    /** Renders one line of a table. Returns false if it is not part of one. */
+    private fun styleTableLine(text: Editable, ls: Int, le: Int, table: Table): Boolean {
+        val index = table.lineStarts.indexOf(ls)
+        if (index < 0 || le <= ls) return false
+        val rule = maxOf(1, Math.round(bodyPx * 0.05f))
+
+        if (index == 1) {
+            text.setSpan(TableDividerSpan(table.widths, rule), ls, le, EX)
+            return true
+        }
+        val cells = cellsOf(text.subSequence(ls, le).toString())
+        text.setSpan(
+            TableRowSpan(
+                cells, table.widths, table.aligns,
+                header = index == 0,
+                pad = tableCellPad(),
+                rule = rule,
+                firstRow = index == 0,
+                lastRow = ls == table.lineStarts.last()
+            ),
+            ls, le, EX
+        )
+        return true
+    }
 
     // ----------------------------------------------------------------- util
 
@@ -359,6 +570,9 @@ class MarkdownStyler(private val prefs: Prefs) {
 
     companion object {
         private const val EX = Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+
+        private val DELIMITER_ROW =
+            Regex("^\\|?\\s*:?-{1,}:?\\s*(\\|\\s*:?-{1,}:?\\s*)*\\|?$")
 
         private val FENCE = Regex("^\\s{0,3}(`{3,}|~{3,})\\s*[A-Za-z0-9+#._-]*$")
         private val HR = Regex("^\\s{0,3}([-*_])\\s*(\\1\\s*){2,}$")
