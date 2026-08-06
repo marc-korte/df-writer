@@ -243,6 +243,28 @@ class ShortcutTest {
     }
 
     @Test
+    fun `undo still works after a chrome rebuild`() {
+        setDoc("", 0)
+        for (c in "word") editor.text.insert(editor.selectionStart, c.toString())
+        idle()
+        editor.setSelection(0, 4)
+        chord(KeyEvent.KEYCODE_B)                 // a second, separate history step
+        assertEquals("**word**", body())
+
+        chord(KeyEvent.KEYCODE_EQUALS)            // replaces the entire view tree
+        val after = findView(activity.window.decorView) { it is MarkdownEditor } as MarkdownEditor
+        assertEquals("**word**", after.text.toString())
+
+        // Two steps deep. A rebuild records its own setText, so undoing straight
+        // to "" would also happen with no history at all — landing on "word" is
+        // what proves the real history came across.
+        assertTrue(after.undo())
+        assertEquals("word", after.text.toString())
+        assertTrue(after.undo())
+        assertEquals("", after.text.toString())
+    }
+
+    @Test
     fun `a rebuild keeps an open find bar and what was typed into it`() {
         setDoc("find the word here", 0)
         chord(KeyEvent.KEYCODE_F)

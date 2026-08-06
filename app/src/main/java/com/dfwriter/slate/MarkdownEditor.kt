@@ -182,11 +182,17 @@ class MarkdownEditor @JvmOverloads constructor(
      * own, so one is kept here. Consecutive typing coalesces into a single step,
      * because undoing one character at a time is not undo, it is punishment.
      */
-    private class Change(
-        val start: Int,
-        val before: CharSequence,
-        var after: CharSequence,
-        var at: Long
+    class Change internal constructor(
+        internal val start: Int,
+        internal val before: CharSequence,
+        internal var after: CharSequence,
+        internal var at: Long
+    )
+
+    /** The two stacks, so a view rebuild can carry the history to a new editor. */
+    class History internal constructor(
+        internal val undo: List<Change>,
+        internal val redo: List<Change>
     )
 
     private val undoStack = ArrayList<Change>()
@@ -249,6 +255,18 @@ class MarkdownEditor @JvmOverloads constructor(
     fun clearHistory() {
         undoStack.clear()
         redoStack.clear()
+    }
+
+    fun snapshotHistory(): History = History(undoStack.toList(), redoStack.toList())
+
+    /**
+     * Reinstates a history captured from a previous editor. Changing the
+     * interface scale replaces the whole view tree, and losing every undo step
+     * to a cosmetic setting is not something a writer should have to expect.
+     */
+    fun restoreHistory(h: History) {
+        undoStack.clear(); undoStack.addAll(h.undo)
+        redoStack.clear(); redoStack.addAll(h.redo)
     }
 
     // ------------------------------------------------------------- metrics

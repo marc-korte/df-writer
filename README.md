@@ -157,7 +157,14 @@ pipe tables.
 
 Files autosave every few seconds and again whenever the app is backgrounded,
 written via a temporary file and a rename so a crash mid-write cannot truncate a
-draft. A shadow copy is also kept in the app's private storage.
+draft. A shadow copy is also kept in the app's private storage, and if a run ends
+without its text reaching disk — a crash, or a save that failed for want of a
+permission — the next start offers that text back rather than discarding it. The
+offer is silent in the normal case, because after a clean exit the copy and the
+file agree.
+
+Undo survives a change of interface scale or handedness, both of which rebuild
+the whole view tree.
 
 Export produces a self-contained styled HTML file, or a paginated A4 PDF
 rendered directly from the same engine that draws the screen. Both land in an
@@ -181,7 +188,7 @@ your own key instead, copy `keystore.properties.example` to
 
 ### Tests
 
-84 tests, all passing. They cover the parts that would otherwise fail silently:
+106 tests, all passing. They cover the parts that would otherwise fail silently:
 
 - **`PureLogicTest`** — the density decision against a truthful Manta, a Manta
   reporting a false 160 dpi, garbage metrics and an ordinary high-density phone;
@@ -202,6 +209,14 @@ your own key instead, copy `keystore.properties.example` to
   silently does nothing. Every formatting chord, undo and redo, each panel
   opening and closing on Escape, the mode toggles, and that a scale change
   preserves the document and the caret through the view rebuild.
+- **`DocStoreTest`** — the file layer against a real filesystem, since this is
+  where a bug costs words rather than pixels: that a save leaves no temporary
+  file behind, that a failed save leaves the previous contents intact, that
+  rename refuses to clobber an existing file, and that the recovery copy is
+  offered only when it belongs to the open document and differs from it.
+- **`RecoveryTest`** — starting up after text failed to reach disk, driven from
+  the outside: arrange the leftovers, start the app, check what it offers and
+  that restoring writes through.
 - **`ActivityStartupTest`** — that the app actually starts and survives a full
   lifecycle round trip.
 

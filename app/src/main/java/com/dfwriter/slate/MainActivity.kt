@@ -78,6 +78,7 @@ class MainActivity : Activity() {
 
         requestStorageIfNeeded()
         restoreDocument()
+        offerRecovery()
         ui.postDelayed(autosave, 4000)
     }
 
@@ -311,6 +312,52 @@ class MainActivity : Activity() {
             runCatching { welcome.writeText(WELCOME, Charsets.UTF_8) }
         }
         if (welcome.exists()) loadInto(welcome) else newDocument()
+    }
+
+    /**
+     * If the last run ended without its text reaching disk — a crash, or a save
+     * that failed — the shadow copy is still in private storage. Offer it rather
+     * than quietly discarding the difference.
+     */
+    private fun offerRecovery() {
+        val recovered = store.recoverableText(editor.text.toString()) ?: return
+        val onDisk = editor.text.toString()
+
+        sheet.configure(
+            "Unsaved text was recovered",
+            "",
+            listOf(
+                ListSheet.Item(
+                    "Restore the recovered text",
+                    "${DocStore.countWords(recovered)} words",
+                    payload = RECOVER_RESTORE
+                ),
+                ListSheet.Item(
+                    "Keep what is on disk",
+                    "${DocStore.countWords(onDisk)} words",
+                    payload = RECOVER_DISCARD
+                )
+            ),
+            ""
+        )
+        sheet.onFreeText = null
+        sheet.onPick = { item ->
+            closeSheets()
+            if (item.payload == RECOVER_RESTORE) {
+                editor.setText(recovered)
+                editor.restyleNow()
+                editor.setSelection(recovered.length.coerceIn(0, editor.text.length))
+                editor.clearHistory()
+                store.dirty = true
+                if (saveQuietly()) flash("Recovered text restored and saved")
+            } else {
+                store.clearScratch()
+                flash("Recovered text discarded")
+            }
+            updateStatus()
+        }
+        scrim.visibility = View.VISIBLE
+        sheet.show()
     }
 
     private fun openFromIntent(i: Intent): Boolean {
@@ -727,6 +774,7 @@ class MainActivity : Activity() {
         // would otherwise vanish along with whatever had been typed into it.
         val findWasOpen = findBar.visibility == View.VISIBLE
         val findQuery = findBar.queryText()
+        val history = editor.snapshotHistory()
 
         root.removeAllViews()
         buildUi()
@@ -738,6 +786,8 @@ class MainActivity : Activity() {
         editor.requestFocus()
         editor.post { editor.scrollTo(0, scrollY) }
         store.dirty = wasDirty
+        // After setText, which itself records an edit that never happened.
+        editor.restoreHistory(history)
 
         if (findWasOpen) {
             findBar.setQuery(findQuery)
@@ -1029,6 +1079,9 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        private const val RECOVER_RESTORE = "recover:restore"
+        private const val RECOVER_DISCARD = "recover:discard"
+
         private val WELCOME = """
             # Welcome to Slate
 

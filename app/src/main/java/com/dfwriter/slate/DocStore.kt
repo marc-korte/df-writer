@@ -169,14 +169,51 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
         return ok
     }
 
-    /** Never lose a draft to a crash or an OOM kill: a shadow copy, always. */
+    // ------------------------------------------------------------- recovery
+
+    private val scratchBody: File get() = File(ctx.filesDir, "scratch.md")
+    private val scratchOwnerFile: File get() = File(ctx.filesDir, "scratch.path")
+
+    /**
+     * A shadow copy in private storage, written on every pause and whenever a
+     * save fails. It records which document it belongs to, so a later run can
+     * tell recovered text apart from text that simply belongs elsewhere.
+     *
+     * After a clean exit this matches the file on disk, which is what makes the
+     * recovery prompt silent in the normal case: there is nothing to recover
+     * when the two agree.
+     */
     fun writeScratch(body: String) {
-        runCatching { File(ctx.filesDir, "scratch.md").writeText(body, Charsets.UTF_8) }
+        runCatching {
+            scratchBody.writeText(body, Charsets.UTF_8)
+            scratchOwnerFile.writeText(current?.absolutePath ?: "", Charsets.UTF_8)
+        }
     }
 
     fun readScratch(): String? =
-        runCatching { File(ctx.filesDir, "scratch.md").takeIf { it.exists() }?.readText() }
-            .getOrNull()
+        runCatching { scratchBody.takeIf { it.exists() }?.readText(Charsets.UTF_8) }.getOrNull()
+
+    /** Absolute path of the document the scratch copy came from, if any. */
+    fun scratchOwner(): String? =
+        runCatching { scratchOwnerFile.takeIf { it.exists() }?.readText(Charsets.UTF_8) }
+            .getOrNull()?.trim()?.ifEmpty { null }
+
+    fun clearScratch() {
+        runCatching { scratchBody.delete(); scratchOwnerFile.delete() }
+    }
+
+    /**
+     * The text of an unsaved draft that outlived its process, or null when
+     * there is nothing to offer. [against] is what was just loaded from disk.
+     */
+    fun recoverableText(against: String): String? {
+        val scratch = readScratch() ?: return null
+        if (scratch.isEmpty() || scratch == against) return null
+        // Only offer text belonging to the document actually open, so switching
+        // files does not resurrect a draft from a different one.
+        if (scratchOwner() != current?.absolutePath) return null
+        return scratch
+    }
 
     companion object {
         fun ensureExt(name: String): String {
