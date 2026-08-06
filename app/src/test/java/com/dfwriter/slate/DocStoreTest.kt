@@ -236,6 +236,109 @@ class DocStoreTest {
         assertFalse(store.dirty)
     }
 
+    // ------------------------------------------------------------- races
+
+    @Test
+    fun `a save queued before a rename does not put the old name back`() {
+        val f = store.createAndOpen(lib, "before")!!
+        store.save("original")
+        val gen = store.generation()
+
+        val renamed = store.rename("after.md")!!
+        // The write was snapshotted against the old name and only reaches the
+        // card now, which is exactly the order an autosave can arrive in.
+        assertFalse("a stale write must be refused", store.writeThrough(f, "late text", gen))
+        assertFalse("the old name must not come back", f.exists())
+        assertEquals("original", renamed.readText())
+    }
+
+    @Test
+    fun `a save queued before a delete does not resurrect the document`() {
+        val f = store.createAndOpen(lib, "doomed")!!
+        store.save("text")
+        val gen = store.generation()
+
+        assertTrue(store.delete())
+        assertFalse(store.writeThrough(f, "late text", gen))
+        assertFalse("a deleted document must stay deleted", f.exists())
+    }
+
+    @Test
+    fun `a save queued before the rename cannot reclaim the shadow copy`() {
+        val f = store.createAndOpen(lib, "owner")!!
+        store.save("text")
+        val gen = store.generation()
+        store.rename("renamed.md")
+        val ownerAfterRename = store.scratchOwner()
+
+        store.writeThrough(f, "late text", gen)
+        assertEquals(
+            "the shadow copy must still belong to the surviving name",
+            ownerAfterRename, store.scratchOwner()
+        )
+    }
+
+    @Test
+    fun `a save carrying the current generation still lands`() {
+        val f = store.createAndOpen(lib, "live")!!
+        assertTrue(store.writeThrough(f, "current text", store.generation()))
+        assertEquals("current text", f.readText())
+    }
+
+    @Test
+    fun `a save with no generation given is never refused`() {
+        // The main-thread path passes none; it is writing what it just read.
+        val f = store.createAndOpen(lib, "plain")!!
+        store.rename("moved.md")
+        assertTrue(store.writeThrough(store.current!!, "text"))
+    }
+
+    @Test
+    fun `a refusal and a failure are told apart`() {
+        val f = store.createAndOpen(lib, "live")!!
+        val gen = store.generation()
+        assertEquals(
+            DocStore.WriteResult.WROTE,
+            store.writeThroughResult(f, "text", gen)
+        )
+
+        store.rename("moved.md")
+        assertEquals(
+            "a write for a renamed document is stale, not failed",
+            DocStore.WriteResult.STALE,
+            store.writeThroughResult(f, "late", gen)
+        )
+
+        // A path that cannot be written is a real failure, not a stale write.
+        val blocked = File(lib, "nodir/sub/doc.md")
+        File(lib, "nodir").writeText("this is a file, not a folder")
+        assertEquals(
+            DocStore.WriteResult.FAILED,
+            store.writeThroughResult(blocked, "text", store.generation())
+        )
+    }
+
+    // --------------------------------------------------- swap-in-place safety
+
+    @Test
+    fun `a save never leaves the document half written`() {
+        // Whatever the card does with the rename, what ends up at the path is
+        // one complete version of the text — never an empty or partial file.
+        val f = store.createAndOpen(lib, "precious")!!
+        store.save("the original words")
+        // An occupied backup name is the case where the move aside cannot work.
+        File(lib, ".${f.name}.bak").mkdirs()
+
+        store.writeThrough(f, "the replacement words")
+
+        assertTrue("the document must still exist", f.isFile)
+        val text = f.readText()
+        assertTrue(
+            "expected one whole version, got: $text",
+            text == "the original words" || text == "the replacement words"
+        )
+    }
+
     // ------------------------------------------------------------ recovery
 
     @Test

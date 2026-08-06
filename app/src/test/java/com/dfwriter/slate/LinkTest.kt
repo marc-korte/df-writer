@@ -149,6 +149,47 @@ class LinkTest {
         assertNull(shadowOf(activity).nextStartedActivity)
     }
 
+    // ------------------------------------------------------------- targets
+
+    @Test
+    fun `a percent-encoded filename resolves to the file it names`() {
+        File(lib, "My Notes.md").writeText("the notes")
+        editor.setText("[see](My%20Notes.md)\n")
+        editor.restyleNow()
+        idle()
+        caretInsideLinkText("see")
+        pressCtrlEnter()
+
+        assertNull(
+            "a document beside this one must not be handed to a browser",
+            shadowOf(activity).nextStartedActivity
+        )
+        val now = find(activity.window.decorView) { it is MarkdownEditor } as MarkdownEditor
+        assertEquals("the notes", now.text.toString())
+    }
+
+    @Test
+    fun `a link cannot walk out of the library and become the open document`() {
+        // Opening a file also makes it what autosave writes back to, so a
+        // document must not be able to point the editor somewhere else on the
+        // card and have it adopted.
+        val outside = File(lib.parentFile, "outside-${System.nanoTime()}.md")
+        outside.writeText("not yours")
+
+        editor.setText("[escape](../${outside.name})\n")
+        editor.restyleNow()
+        idle()
+        caretInsideLinkText("escape")
+        pressCtrlEnter()
+
+        val now = find(activity.window.decorView) { it is MarkdownEditor } as MarkdownEditor
+        assertTrue(
+            "the file outside the library must not have been opened",
+            now.text.toString() != "not yours"
+        )
+        outside.delete()
+    }
+
     // ------------------------------------------------------------------ tap
 
     @Test
@@ -204,6 +245,92 @@ class LinkTest {
         val l = editor.layout!!
         return ((l.getLineTop(0) + l.getLineBottom(0)) / 2f) +
             editor.totalPaddingTop - editor.scrollY
+    }
+
+    /**
+     * The first link on the line points at a document beside this one, which is
+     * opened here rather than handed to another app — so the proof that it was
+     * not followed is the editor still holding the document it started with.
+     */
+    private fun assertNotFollowed(why: String) {
+        assertNull(why, shadowOf(activity).nextStartedActivity)
+        val now = find(activity.window.decorView) { it is MarkdownEditor } as MarkdownEditor
+        assertTrue(why, now.text.toString() != "the other document")
+    }
+
+    private fun send(action: Int, x: Float, y: Float, time: Long = 0L) {
+        val ev = android.view.MotionEvent.obtain(0L, time, action, x, y, 0)
+        editor.onTouchEvent(ev)
+        ev.recycle()
+    }
+
+    private fun layoutAndAimElsewhere() {
+        editor.layout(0, 0, 1600, 1200)
+        editor.restyleNow()
+        editor.setSelection(editor.text.toString().indexOf("the end"))
+        idle()
+    }
+
+    @Test
+    fun `a drag that wanders and comes back is not a tap`() {
+        layoutAndAimElsewhere()
+        val x = firstLinkX()
+        val y = firstLineY()
+
+        // A scroll that ends where it began would otherwise measure as a tap,
+        // because only the down and the up positions were ever compared.
+        send(android.view.MotionEvent.ACTION_DOWN, x, y)
+        send(android.view.MotionEvent.ACTION_MOVE, x, y + 400f)
+        send(android.view.MotionEvent.ACTION_MOVE, x, y)
+        send(android.view.MotionEvent.ACTION_UP, x, y)
+        idle()
+
+        assertNotFollowed("a drag must not follow the link")
+    }
+
+    @Test
+    fun `a second finger rules the gesture out`() {
+        layoutAndAimElsewhere()
+        val x = firstLinkX()
+        val y = firstLineY()
+
+        send(android.view.MotionEvent.ACTION_DOWN, x, y)
+        send(android.view.MotionEvent.ACTION_POINTER_DOWN, x + 200f, y)
+        send(android.view.MotionEvent.ACTION_UP, x, y)
+        idle()
+
+        assertNotFollowed("a pinch or two-finger scroll must not follow a link")
+    }
+
+    @Test
+    fun `a long press is not a tap`() {
+        layoutAndAimElsewhere()
+        val x = firstLinkX()
+        val y = firstLineY()
+
+        send(android.view.MotionEvent.ACTION_DOWN, x, y, time = 0L)
+        // Past the long-press threshold, where a selection is being started.
+        send(
+            android.view.MotionEvent.ACTION_UP, x, y,
+            time = android.view.ViewConfiguration.getLongPressTimeout() + 200L
+        )
+        idle()
+
+        assertNotFollowed("a long press must not follow the link")
+    }
+
+    @Test
+    fun `a cancelled gesture does not follow the link`() {
+        layoutAndAimElsewhere()
+        val x = firstLinkX()
+        val y = firstLineY()
+
+        send(android.view.MotionEvent.ACTION_DOWN, x, y)
+        send(android.view.MotionEvent.ACTION_CANCEL, x, y)
+        send(android.view.MotionEvent.ACTION_UP, x, y)
+        idle()
+
+        assertNotFollowed("a cancelled gesture must not follow the link")
     }
 
     private fun tapAt(x: Float, y: Float) {

@@ -324,6 +324,12 @@ object Md {
         }
     }
 
+    /** Parks generated markup behind a sentinel and returns the placeholder. */
+    private fun hold(held: ArrayList<String>, markup: String): String {
+        held.add(markup)
+        return "\u0000${held.size - 1}\u0000"
+    }
+
     private fun inline(sIn: String): String {
         // Protect code spans from every other rule, exactly as Markdown requires.
         val codes = ArrayList<String>()
@@ -334,13 +340,26 @@ object Md {
             "\u0000${codes.size - 1}\u0000"
         }
         s = escape(s)
+        // Generated markup is parked behind a sentinel the same way code spans
+        // are. The emphasis passes below run over the whole string, and a URL
+        // is free to contain the very characters they look for: a file called
+        // a*b*c.png would otherwise come back with an <em> inside its src.
         s = Regex("!\\[([^\\]]*)]\\(([^)\\s]+)(?:\\s+&quot;([^&]*)&quot;)?\\)")
-            .replace(s) { m -> "<img src=\"${m.groupValues[2]}\" alt=\"${m.groupValues[1]}\">" }
+            .replace(s) { m ->
+                // Same rule as a link below: a scheme that could execute is not
+                // written into the page at all, and the alt text stands in.
+                if (safeHref(m.groupValues[2])) {
+                    hold(codes, "<img src=\"${m.groupValues[2]}\" alt=\"${m.groupValues[1]}\">")
+                } else m.groupValues[1]
+            }
         s = Regex("\\[([^\\]]*)]\\(([^)\\s]+)\\)")
             .replace(s) { m ->
                 // An unusable scheme leaves the words behind and the link out.
+                // Only the tag is held back, so the words between it and its
+                // closing tag still take their emphasis.
                 if (safeHref(m.groupValues[2])) {
-                    "<a href=\"${m.groupValues[2]}\">${m.groupValues[1]}</a>"
+                    hold(codes, "<a href=\"${m.groupValues[2]}\">") +
+                        m.groupValues[1] + hold(codes, "</a>")
                 } else m.groupValues[1]
             }
         s = Regex("\\*{3}(?!\\s)(.+?)(?<!\\s)\\*{3}").replace(s) { "<strong><em>${it.groupValues[1]}</em></strong>" }

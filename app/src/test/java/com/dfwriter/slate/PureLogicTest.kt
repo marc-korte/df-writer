@@ -214,6 +214,33 @@ class PureLogicTest {
     }
 
     @Test
+    fun `a url containing emphasis characters is not reformatted`() {
+        // The emphasis passes run over the generated markup, so a file whose
+        // name contains a star used to come back with an <em> inside its src.
+        val html = Md.render("![shot](a*b*c.png)\n")
+        assertTrue(html, html.contains("src=\"a*b*c.png\""))
+        assertTrue("no emphasis may be applied inside the attribute", !html.contains("<em>"))
+
+        val link = Md.render("[docs](http://x/a*b*c)\n")
+        assertTrue(link, link.contains("href=\"http://x/a*b*c\""))
+        assertTrue(link, !link.contains("<em>"))
+    }
+
+    @Test
+    fun `an image with an unusable scheme is left as its alt text`() {
+        val html = Md.render("![alt words](javascript:alert(1))\n")
+        assertTrue("no img element may be written", !html.contains("<img"))
+        assertTrue(html, html.contains("alt words"))
+    }
+
+    @Test
+    fun `emphasis still applies to the words inside a link`() {
+        val html = Md.render("[a **bold** word](http://x)\n")
+        assertTrue(html, html.contains("<a href=\"http://x\">"))
+        assertTrue("only the tag is held back, not the text", html.contains("<strong>bold</strong>"))
+    }
+
+    @Test
     fun `html special characters in prose are escaped`() {
         val html = Md.render("5 < 6 & 7 > 2\n")
         assertTrue(html, html.contains("5 &lt; 6 &amp; 7 &gt; 2"))

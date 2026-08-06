@@ -135,7 +135,12 @@ class MainActivity : Activity() {
         // with it. Drained unconditionally: a document that is already clean
         // can still have its last autosave in flight, and saveQuietly — which
         // drains as well — would not be reached to wait for it.
-        drainSaves()
+        //
+        // Briefly, though. A pause that blocks for seconds stalls the transition
+        // and can take the app down with it, and a card slow enough to need that
+        // long is a card the shadow copy written below is there for: the text
+        // survives either way, it is only the file that lags.
+        drainSaves(PAUSE_DRAIN_MS)
         if (store.dirty) saveQuietly()
         // While the recovery prompt is unanswered the editor holds the text
         // from disk, and writing that over the shadow copy would destroy the
@@ -161,8 +166,8 @@ class MainActivity : Activity() {
      * Internal rather than private so a test can wait for the same thing the
      * pause path waits for, instead of guessing at a delay.
      */
-    internal fun drainSaves() {
-        runCatching { saveIo.submit { }.get(5, TimeUnit.SECONDS) }
+    internal fun drainSaves(millis: Long = FULL_DRAIN_MS) {
+        runCatching { saveIo.submit { }.get(millis, TimeUnit.MILLISECONDS) }
     }
 
     // ----------------------------------------------------------------- view
@@ -552,17 +557,26 @@ class MainActivity : Activity() {
         // written, so it has to leave the document dirty for the next tick.
         store.dirty = false
         updateStatus()
+        val gen = store.generation()
         saveIo.execute {
-            val ok = store.writeThrough(f, body)
-            // Text that did not reach the card is kept in private storage, the
-            // same as a failed save on the main thread does — and written from
-            // this thread, so the main one never waits on a failing card.
-            if (!ok) store.writeScratchFor(f.absolutePath, body)
+            val result = store.writeThroughResult(f, body, gen)
+            // Only a real failure is worth keeping and worth reporting. A stale
+            // write belongs to a document that has since been renamed or
+            // deleted: its text is not the open document's, so shadowing it
+            // would overwrite the live draft with another file's words, and
+            // saying "save failed" would be a lie about a document that is fine.
+            if (result == DocStore.WriteResult.FAILED) {
+                // Text that did not reach the card is kept in private storage,
+                // the same as a failed save on the main thread does — and
+                // written from this thread, so the main one never waits on a
+                // failing card.
+                store.writeScratchFor(f.absolutePath, body)
+            }
             ui.post {
                 // This thread outlives the activity, so a message posted from
                 // it can arrive after an onDestroy that could not cancel it.
                 if (isDestroyed || isFinishing) return@post
-                if (!ok) {
+                if (result == DocStore.WriteResult.FAILED) {
                     store.dirty = true
                     flash("Save failed — check storage permission")
                     updateStatus()
@@ -1289,16 +1303,25 @@ class MainActivity : Activity() {
         }
         if (target.isEmpty()) return
 
-        if (target.startsWith("#")) {
-            jumpToHeading(target.removePrefix("#"))
+        // A heading or a filename with a space in it arrives percent-encoded,
+        // and neither an anchor nor a path can be matched until it is decoded.
+        // The address handed to the system further down keeps its encoding,
+        // which is what a URL is supposed to carry.
+        val decoded = ImageCache.percentDecode(target)
+
+        if (decoded.startsWith("#")) {
+            jumpToHeading(decoded.removePrefix("#"))
             return
         }
 
         val hasScheme = Regex("^[A-Za-z][A-Za-z0-9+.-]*:").containsMatchIn(target)
         if (!hasScheme) {
             val here = store.current?.parentFile ?: store.libraryRoot()
-            val f = File(here, target)
-            if (f.isFile && store.isText(f)) {
+            val f = File(here, decoded)
+            // Opening a file also makes it the document that autosave writes
+            // back to, so a link is not allowed to walk out of the library with
+            // ../.. and hand the editor something elsewhere on the card.
+            if (f.isFile && store.isText(f) && withinLibrary(f, here)) {
                 openWithSave(f)
                 flash("Opened ${f.name}")
                 return
@@ -1312,6 +1335,19 @@ class MainActivity : Activity() {
         runCatching { startActivity(intent) }
             .onFailure { flash("Nothing on this device opens $uri") }
     }
+
+    /**
+     * True when [f] really sits inside the document's own folder or the library.
+     * Resolved canonically, so `../` and a symlink are both answered by where
+     * the path ends up rather than by how it was written.
+     */
+    private fun withinLibrary(f: File, here: File): Boolean = runCatching {
+        val path = f.canonicalPath
+        listOf(here, store.libraryRoot()).any { root ->
+            val r = root.canonicalPath
+            path == r || path.startsWith(r + File.separator)
+        }
+    }.getOrDefault(false)
 
     /** GitHub-style anchor: "my heading" matches "## My Heading". */
     private fun jumpToHeading(anchor: String) {
@@ -1336,6 +1372,15 @@ class MainActivity : Activity() {
     companion object {
         private const val RECOVER_RESTORE = "recover:restore"
         private const val RECOVER_DISCARD = "recover:discard"
+
+        /**
+         * What an explicit save waits for. It has to be the last word, so it
+         * waits as long as the card needs.
+         */
+        private const val FULL_DRAIN_MS = 5_000L
+
+        /** What a pause waits for; see onPause for why it is not the above. */
+        private const val PAUSE_DRAIN_MS = 400L
 
         private val WELCOME = """
             # Welcome to Slate

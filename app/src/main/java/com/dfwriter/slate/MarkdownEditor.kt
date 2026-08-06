@@ -40,6 +40,10 @@ class MarkdownEditor @JvmOverloads constructor(
     private var pendingFrom = -1
     private var pendingTo = -1
     private var imeWanted = true
+    private var downX = 0f
+    private var downY = 0f
+    private var downAt = 0L
+    private var notATap = false
 
     fun bind(prefs: Prefs, styler: MarkdownStyler) {
         this.prefs = prefs
@@ -118,16 +122,58 @@ class MarkdownEditor @JvmOverloads constructor(
      * page behaves like a link.
      */
     override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+        when (event.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> {
+                downX = event.x
+                downY = event.y
+                downAt = event.eventTime
+                notATap = false
+            }
+            // Straying past the slop at any point rules the gesture out for
+            // good. Comparing only where the finger went down and came up would
+            // let a scroll that wandered off and came back count as a tap.
+            android.view.MotionEvent.ACTION_MOVE -> if (!notATap && movedTooFar(event)) {
+                notATap = true
+            }
+            // A second finger means a pinch or a two-finger scroll, never a tap
+            // on a link, however still the first finger happens to have been.
+            android.view.MotionEvent.ACTION_POINTER_DOWN -> notATap = true
+            android.view.MotionEvent.ACTION_CANCEL -> notATap = true
+        }
         if (event.actionMasked == android.view.MotionEvent.ACTION_UP &&
-            ::styler.isInitialized
+            ::styler.isInitialized && isTap(event)
         ) {
+            // Read before the framework sees the event, while the caret is still
+            // where it was: whether a link opens depends on the caret's line.
             val target = linkAt(event.x, event.y)
             if (target != null) {
+                // The framework still gets the up. Swallowing it would leave the
+                // editor's own touch and selection bookkeeping half way through a
+                // gesture it never sees the end of.
+                val handled = super.onTouchEvent(event)
                 onLinkTapped?.invoke(target)
-                return true
+                return handled
             }
         }
         return super.onTouchEvent(event)
+    }
+
+    /**
+     * A tap, rather than the end of a drag or a long press. Without this, a
+     * scroll that happens to lift off over a link would follow it, and so would
+     * the release after a long press meant to start a selection.
+     */
+    private fun isTap(up: android.view.MotionEvent): Boolean {
+        if (notATap) return false
+        if (movedTooFar(up)) return false
+        return up.eventTime - downAt <= android.view.ViewConfiguration.getLongPressTimeout()
+    }
+
+    private fun movedTooFar(e: android.view.MotionEvent): Boolean {
+        val slop = android.view.ViewConfiguration.get(context).scaledTouchSlop
+        val dx = e.x - downX
+        val dy = e.y - downY
+        return dx * dx + dy * dy > (slop * slop).toFloat()
     }
 
     /** Internal so a test can aim at it without synthesising touch events. */

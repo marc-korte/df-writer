@@ -28,6 +28,24 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
      */
     private val ioLock = Any()
 
+    /**
+     * Bumped whenever the open document's identity changes. An autosave carries
+     * the value it was queued at, so a write still on its way when the document
+     * is renamed or deleted is dropped rather than recreating the old path or
+     * filing its shadow copy under a name that no longer exists.
+     *
+     * Volatile: written on the main thread, read on the save thread.
+     */
+    @Volatile
+    private var generation: Int = 0
+
+    /** The value an autosave should carry, taken when its text is snapshotted. */
+    fun generation(): Int = generation
+
+    private fun identityChanged() {
+        generation++
+    }
+
     val fallbackDir: File
         get() = File(ctx.getExternalFilesDir(null) ?: ctx.filesDir, "Documents")
 
@@ -89,7 +107,12 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
 
     fun open(f: File): String {
         val body = read(f)
-        current = f
+        // Under the same lock a write holds, so a save cannot pass its
+        // generation check and then find the document changed underneath it.
+        synchronized(ioLock) {
+            current = f
+            identityChanged()
+        }
         dirty = false
         prefs.lastFile = f.absolutePath
         return body
@@ -119,12 +142,32 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
      *
      * Returns false rather than throwing: this sits on the autosave path.
      */
-    fun writeThrough(f: File, body: String): Boolean = synchronized(ioLock) {
+    /**
+     * Why a write did or did not happen. A refusal and a failure look the same
+     * from the outside and must not be treated the same: a failure is the
+     * user's text not reaching the card, worth keeping and worth saying; a
+     * refusal is a write for a document that no longer exists, and the only
+     * correct response to it is to do nothing at all.
+     */
+    enum class WriteResult { WROTE, FAILED, STALE }
+
+    @JvmOverloads
+    fun writeThrough(f: File, body: String, gen: Int = -1): Boolean =
+        writeThroughResult(f, body, gen) == WriteResult.WROTE
+
+    fun writeThroughResult(
+        f: File, body: String, gen: Int = -1
+    ): WriteResult = synchronized(ioLock) {
         try {
+            // A write queued against a document that has since been renamed or
+            // deleted would put the old path back on the card, and file its
+            // shadow copy under a name nothing will ask for again.
+            if (gen >= 0 && gen != generation) return@synchronized WriteResult.STALE
             f.parentFile?.mkdirs()
             // Write beside the target then swap, so a crash mid-write cannot
             // truncate the only copy of a draft.
             val tmp = File(f.parentFile, ".${f.name}.tmp")
+            val existedBefore = f.exists()
             writeSynced(tmp, body)
             if (!tmp.renameTo(f)) {
                 // Some cards refuse to rename onto a name that already exists.
@@ -135,14 +178,27 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
                 if (f.isFile) {
                     aside.delete()
                     moved = f.renameTo(aside)
+                    // Neither the rename onto it nor the move away from it
+                    // worked, so the only complete copy is the one still sitting
+                    // at f. Writing over it in place is the one thing this whole
+                    // dance exists to avoid: fail, and leave it whole.
+                    if (!moved) return@synchronized WriteResult.FAILED
                 }
                 if (!tmp.renameTo(f)) {
                     try {
                         writeSynced(f, body)
                     } catch (e: Exception) {
-                        // Put the previous text back rather than leaving a hole;
-                        // the new text is still whole in tmp.
-                        if (moved && !f.exists()) aside.renameTo(f)
+                        // Clear the target only where there is a known-good copy
+                        // to put back, or where nothing was there to begin with.
+                        // Anything else at this path was never this save's to
+                        // remove, and removing it would be the data loss the
+                        // whole swap exists to prevent.
+                        if (moved) {
+                            f.delete()
+                            aside.renameTo(f)
+                        } else if (!existedBefore) {
+                            f.delete()
+                        }
                         throw e
                     }
                 }
@@ -152,9 +208,9 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
             // Without this the shadow copy is older than the file from here on,
             // and the next launch would offer it as if it were newer.
             writeScratchFor(f.absolutePath, body)
-            true
+            WriteResult.WROTE
         } catch (e: Exception) {
-            false
+            WriteResult.FAILED
         }
     }
 
@@ -173,7 +229,10 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
     }
 
     fun saveAs(f: File, body: String): File? {
-        current = f
+        synchronized(ioLock) {
+            current = f
+            identityChanged()
+        }
         return save(body)
     }
 
@@ -199,7 +258,10 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
         val f = newFile(dir, title)
         f.parentFile?.mkdirs()
         f.writeText("", Charsets.UTF_8)
-        current = f
+        synchronized(ioLock) {
+            current = f
+            identityChanged()
+        }
         dirty = false
         prefs.lastFile = f.absolutePath
         f
@@ -217,9 +279,12 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
         val f = current ?: return null
         val target = File(f.parentFile, ensureExt(to))
         if (target.exists()) return null
-        return if (f.renameTo(target)) {
+        // The move itself is inside the lock too: a write already past its
+        // generation check would otherwise land on the old name after it.
+        val renamed = synchronized(ioLock) {
+            if (!f.renameTo(target)) return null
             current = target
-            prefs.lastFile = target.absolutePath
+            identityChanged()
             // The shadow copy is matched by path, so a draft written before the
             // rename would be refused after it.
             runCatching {
@@ -228,19 +293,25 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
                 }
             }
             target
-        } else null
+        }
+        prefs.lastFile = renamed.absolutePath
+        return renamed
     }
 
     fun delete(): Boolean {
         val f = current ?: return false
-        val ok = f.delete()
-        if (ok) {
-            // A document made later in the same minute can be handed the same
-            // name, so the dead one's draft must not outlive it.
-            if (scratchOwner() == f.absolutePath) clearScratch()
-            current = null
-            prefs.lastFile = ""
+        val ok = synchronized(ioLock) {
+            val gone = f.delete()
+            if (gone) {
+                // A document made later in the same minute can be handed the
+                // same name, so the dead one's draft must not outlive it.
+                if (scratchOwner() == f.absolutePath) clearScratch()
+                current = null
+                identityChanged()
+            }
+            gone
         }
+        if (ok) prefs.lastFile = ""
         return ok
     }
 

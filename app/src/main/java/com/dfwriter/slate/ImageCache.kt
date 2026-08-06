@@ -154,7 +154,7 @@ object ImageCache {
      * Percent-decoding and nothing else. URLDecoder would also read "+" as a
      * space, which turns a file honestly named "C++.png" into "C  .png".
      */
-    private fun percentDecode(s: String): String {
+    internal fun percentDecode(s: String): String {
         if (!s.contains('%')) return s
         val out = java.io.ByteArrayOutputStream(s.length)
         var i = 0
