@@ -12,6 +12,9 @@ import android.text.TextWatcher
 import android.util.AttributeSet
 import android.view.KeyEvent
 import android.view.View
+import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import kotlin.math.max
@@ -33,6 +36,7 @@ class MarkdownEditor @JvmOverloads constructor(
     private var lastCaretLineEnd = -1
     private var styling = false
     private var pendingRestyle: Runnable? = null
+    private var imeWanted = true
 
     fun bind(prefs: Prefs, styler: MarkdownStyler) {
         this.prefs = prefs
@@ -111,12 +115,52 @@ class MarkdownEditor @JvmOverloads constructor(
             SoftKeyboard.NEVER -> false
             SoftKeyboard.AUTO -> !hasHardwareKeyboard()
         }
+        val changed = wanted != imeWanted
+        imeWanted = wanted
+
+        // The decisive part. Whether key events are offered to the IME at all is
+        // a property of the *window*, not of the focused view: ViewRootImpl asks
+        // WindowManager.LayoutParams.mayUseInputMethod(flags). With
+        // FLAG_ALT_FOCUSABLE_IM set and FLAG_NOT_FOCUSABLE clear, the window
+        // stays focusable but stops being an input-method target, so hardware
+        // keys go straight to the view instead of through PinyinIME, which
+        // consumes them without committing anything.
+        (context as? android.app.Activity)?.window?.let { w ->
+            if (wanted) w.clearFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+            else w.addFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+        }
+
         showSoftInputOnFocus = wanted
+        // The input connection is created once per focus, so the decision in
+        // onCreateInputConnection only takes effect after a restart.
+        if (changed) runCatching { imm().restartInput(this) }
         // Setting the flag only affects the *next* focus event. If the keyboard
         // has just been unpaired the editor is already focused, so without this
         // there would be no hardware keyboard and no on-screen one either, and
         // no way left to type.
-        if (!wanted) hideIme() else if (isFocused) showIme()
+        // Showing has to wait a frame: clearing FLAG_ALT_FOCUSABLE_IM only makes
+        // this window an input-method target again after the next relayout, and
+        // showSoftInput fails silently if it runs before that.
+        if (!wanted) hideIme() else if (isFocused) post { showIme() }
+    }
+
+    /**
+     * Refuses an input connection while a hardware keyboard is attached.
+     *
+     * This device ships exactly one IME, PinyinIME, and it consumes every
+     * hardware key it is offered — ordinary letters and bare function keys
+     * alike — without committing anything. Android only routes keys through the
+     * IME when the focused view is an IME target, and a view with no input
+     * connection is not one. Declining the connection therefore puts the keys
+     * back on their normal path to the key listener, which is how text entry
+     * works on a machine with no IME at all.
+     *
+     * The connection comes straight back when the keyboard is unpaired, so the
+     * on-screen keyboard still works when it is the only thing to type on.
+     */
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+        if (!imeWanted) return null
+        return super.onCreateInputConnection(outAttrs)
     }
 
     private fun imm(): InputMethodManager =

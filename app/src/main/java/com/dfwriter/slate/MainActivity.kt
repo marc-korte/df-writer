@@ -37,6 +37,7 @@ class MainActivity : Activity() {
     private lateinit var statusRight: TextView
     private lateinit var sheet: ListSheet
     private lateinit var settings: SettingsSheet
+    private lateinit var scrim: View
     private lateinit var findBar: FindBar
 
     private val ui = Handler(Looper.getMainLooper())
@@ -167,6 +168,20 @@ class MainActivity : Activity() {
 
         root.addView(
             main,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        // Tapping outside a panel closes it. Escape does too, but Escape is no
+        // help at all on the day the keyboard will not connect.
+        scrim = View(this).apply {
+            visibility = View.GONE
+            isClickable = true
+            setOnClickListener { closeSheets() }
+        }
+        root.addView(
+            scrim,
             FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
             )
@@ -382,6 +397,7 @@ class MainActivity : Activity() {
     private fun closeSheets() {
         sheet.hide()
         settings.hide()
+        scrim.visibility = View.GONE
         editor.requestFocus()
     }
 
@@ -393,6 +409,7 @@ class MainActivity : Activity() {
         val items = commands().map {
             ListSheet.Item(title = it.title, keys = it.keys, payload = it)
         }
+        scrim.visibility = View.VISIBLE
         sheet.configure("Commands", "Type a command…", items)
         sheet.onPick = { item ->
             closeSheets()
@@ -415,6 +432,7 @@ class MainActivity : Activity() {
                 else ListSheet.Item(e.file.name, humanSize(e.file.length()), payload = e.file)
             )
         }
+        scrim.visibility = View.VISIBLE
         sheet.configure("Files · ${dir.absolutePath}", "Filter, or type a new name…", items)
         sheet.onPick = { item ->
             val f = item.payload as? File
@@ -450,6 +468,7 @@ class MainActivity : Activity() {
         val items = heads.map {
             ListSheet.Item(it.title, "H${it.level}", indent = it.level - 1, payload = it.offset)
         }
+        scrim.visibility = View.VISIBLE
         sheet.configure("Outline", "Jump to a heading…", items)
         sheet.onPick = { item ->
             closeSheets()
@@ -464,6 +483,7 @@ class MainActivity : Activity() {
 
     private fun showSettings() {
         sheet.hide()
+        scrim.visibility = View.VISIBLE
         settings.setRows(settingRows())
         settings.show()
     }
@@ -936,6 +956,7 @@ class MainActivity : Activity() {
     // -------------------------------------------------------------- prompts
 
     private fun promptRename() {
+        scrim.visibility = View.VISIBLE
         sheet.configure(
             "Rename", store.current?.name ?: "name.md", emptyList(),
             "Type the new name, then Enter"
@@ -952,6 +973,7 @@ class MainActivity : Activity() {
 
     private fun promptDelete() {
         val name = store.current?.name ?: return
+        scrim.visibility = View.VISIBLE
         sheet.configure(
             "Delete $name?", "type DELETE to confirm", emptyList(),
             "This cannot be undone"

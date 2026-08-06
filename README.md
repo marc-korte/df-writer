@@ -57,10 +57,17 @@ your eyes, two keystrokes fix it permanently.
   auto-rotate, so Slate leaves rotation alone by default and turning the tablet
   turns the page. Pin it with **Ctrl Shift R** or the palette when you want it
   fixed in the folio-as-stand position.
-- **The on-screen keyboard stays out of the way.** This device forces
-  `show_ime_with_hard_keyboard`, so Android would otherwise put the IME up over
-  half the panel even while you type on Bluetooth. Slate suppresses it whenever
-  a hardware keyboard is attached, and brings it back when there isn't one.
+- **The Bluetooth keyboard actually works.** The Manta ships exactly one IME,
+  PinyinIME, and it consumes every hardware key it is offered — letters,
+  Backspace, even bare function keys — without committing anything, so a
+  Bluetooth keyboard looks dead in any app. Slate sets `FLAG_ALT_FOCUSABLE_IM`
+  while a hardware keyboard is attached, which keeps the window focusable but
+  stops it being an input-method target, so keys go straight to the editor.
+  Note that neither declining the input connection nor hiding the IME is enough:
+  Android decides this from window flags, in
+  `WindowManager.LayoutParams.mayUseInputMethod`, not from anything the focused
+  view does. The same flag keeps the on-screen keyboard from covering half the
+  panel, and it is cleared automatically when no hardware keyboard is present.
 - **Left- or right-handed.** The device's own handedness setting is not readable
   by third-party apps, so Slate has its own; controls sit on the side your
   writing hand is already on. Defaults to left-handed.

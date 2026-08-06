@@ -27,8 +27,8 @@ android {
         // legacy external storage so the app can read/write /sdcard/Note
         // directly without depending on the system document picker.
         targetSdk = 29
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.3"
     }
 
     signingConfigs {
