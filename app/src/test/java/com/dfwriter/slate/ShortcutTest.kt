@@ -60,6 +60,14 @@ class ShortcutTest {
 
     private fun idle() = shadowOf(Looper.getMainLooper()).idle()
 
+    /**
+     * Lets the debounced work run. The word count is deliberately taken a
+     * moment after the text changes rather than on every keystroke, so a test
+     * that types and looks immediately is looking too early.
+     */
+    private fun settle() =
+        shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(400))
+
     /** Runs the delayed work too, for the things that undo themselves. */
     private fun advance(ms: Long) =
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(ms))
@@ -581,6 +589,7 @@ class ShortcutTest {
     @Test
     fun `F11 hides the status bar and brings it back up to date`() {
         setDoc("one two three", 0)
+        settle()
         assertTrue(
             "the bar should be showing at rest, saw ${visibleTexts()}",
             visibleTexts().any { it.contains("3 words") }

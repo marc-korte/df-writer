@@ -379,7 +379,10 @@ class MarkdownEditor @JvmOverloads constructor(
             applyingHistory = false
         }
         to.add(c)
-        restyleNow()
+        // The range that changed, not the document. A full restyle clears and
+        // re-adds every span in the buffer, which costs more the longer the
+        // piece is — undoing a character in a novel used to pay for the novel.
+        restyleAround(c.start, c.start + new.length)
         return true
     }
 
@@ -509,6 +512,25 @@ class MarkdownEditor @JvmOverloads constructor(
         // span types make DynamicLayout reflow on their own. Without an explicit
         // pass the old heights survive while the new spans draw, which puts the
         // text of one line on top of another.
+        requestLayout()
+        invalidate()
+    }
+
+    /**
+     * Restyles the lines a change touched, and asks for the layout pass that
+     * a height change needs. The whole-document [restyleNow] is for the things
+     * that really do change everything: a mode toggle, or a new document.
+     */
+    fun restyleAround(from: Int, to: Int) {
+        val e = text ?: return
+        styling = true
+        try {
+            styler.restyleRange(e, from.coerceIn(0, e.length), to.coerceIn(0, e.length), selectionStart)
+            styler.applyFocus(e, selectionStart)
+        } finally {
+            styling = false
+        }
+        rememberCaretLine()
         requestLayout()
         invalidate()
     }

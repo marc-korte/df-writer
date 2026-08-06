@@ -52,6 +52,7 @@ class MainActivity : Activity() {
     private var chromeUi = 1f
     private var chromeBodyPt = 0f
     private var recoveryPending = false
+    private var cachedWords = 0
     private var exporting = false
 
     /**
@@ -293,6 +294,9 @@ class MainActivity : Activity() {
         editor.onEdit = {
             store.dirty = true
             editsSinceRefresh++
+            // Not recounted here: that is the per-keystroke pass this avoids.
+            ui.removeCallbacks(recountSoon)
+            ui.postDelayed(recountSoon, RECOUNT_MS)
             updateStatus()
             ui.removeCallbacks(idleRefresh)
             ui.postDelayed(idleRefresh, 1400)
@@ -516,6 +520,9 @@ class MainActivity : Activity() {
         // though loading is not an edit. Clear it, or every open would rewrite
         // the file on the next autosave tick.
         store.dirty = false
+        // A document just opened gets its count now rather than in a moment.
+        ui.removeCallbacks(recountSoon)
+        recount()
         updateStatus()
     }
 
@@ -926,7 +933,8 @@ class MainActivity : Activity() {
             applyChrome()
             // Nothing is written into the bar while it is hidden, so without
             // this a bar brought back shows whatever it last held until the
-            // next keystroke.
+            // next keystroke — including a count from before it went away.
+            recount()
             updateStatus()
         },
         Cmd("Rotate screen", "Ctrl Shift R") {
@@ -1025,6 +1033,9 @@ class MainActivity : Activity() {
         store.dirty = wasDirty
         // After setText, which itself records an edit that never happened.
         editor.restoreHistory(history)
+        ui.removeCallbacks(recountSoon)
+        recount()
+        updateStatus()
 
         if (findWasOpen) {
             findBar.setQuery(findQuery)
@@ -1238,7 +1249,7 @@ class MainActivity : Activity() {
         val dot = if (store.dirty) " •" else ""
         statusLeft.text = statusMessage ?: "☰  $name$dot"
 
-        val words = DocStore.countWords(editor.text)
+        val words = wordCount()
         val modes = buildString {
             if (prefs.focusMode) append("focus ")
             if (prefs.typewriterMode) append("typewriter ")
@@ -1249,6 +1260,29 @@ class MainActivity : Activity() {
             append("$words words  ·  ${readingTime(words)}")
             append("  ·  ${Math.round(Scale.ui * 100)}%")
         }
+    }
+
+    /**
+     * The status bar's word count, taken from the last count rather than made
+     * fresh. Counting walks the whole document and the bar is refreshed on
+     * every keystroke, so on a manuscript this used to be a full pass over the
+     * book per character typed. The number can lag a moment; the sentence being
+     * typed cannot.
+     */
+    private fun wordCount(): Int = cachedWords
+
+    private fun recount() {
+        cachedWords = DocStore.countWords(editor.text)
+    }
+
+    /**
+     * Queued when the text changes, and only then — a timer that re-armed
+     * itself would walk the document every few hundred milliseconds for as long
+     * as the app was open, whether anything had been written or not.
+     */
+    private val recountSoon = Runnable {
+        recount()
+        updateStatus()
     }
 
     private fun readingTime(words: Int): String {
@@ -1437,6 +1471,13 @@ class MainActivity : Activity() {
 
         /** What a pause waits for; see onPause for why it is not the above. */
         private const val PAUSE_DRAIN_MS = 400L
+
+        /**
+         * How long the word count may lag the text. Long enough that a burst of
+         * typing costs one pass over the document rather than one per key,
+         * short enough to read as immediate.
+         */
+        private const val RECOUNT_MS = 150L
 
         private val WELCOME = """
             # Welcome to Slate
