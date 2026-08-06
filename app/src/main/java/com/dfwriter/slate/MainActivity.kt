@@ -39,6 +39,7 @@ class MainActivity : Activity() {
     private lateinit var statusRight: TextView
     private lateinit var sheet: ListSheet
     private lateinit var settings: SettingsSheet
+    private lateinit var contents: ListSheet
     private lateinit var scrim: View
     private lateinit var findBar: FindBar
 
@@ -248,8 +249,10 @@ class MainActivity : Activity() {
 
         sheet = ListSheet(this, prefs).apply { visibility = View.GONE }
         settings = SettingsSheet(this, prefs).apply { visibility = View.GONE }
+        contents = ListSheet(this, prefs).apply { visibility = View.GONE }
         root.addView(sheet, sheetParams())
         root.addView(settings, sheetParams())
+        root.addView(contents, drawerParams())
 
         wireCallbacks()
         updateStatus()
@@ -257,6 +260,23 @@ class MainActivity : Activity() {
         // against them to decide whether a rebuild is owed.
         chromeUi = Scale.ui
         chromeBodyPt = prefs.bodyPt
+    }
+
+    /**
+     * A drawer down one edge rather than a panel in the middle of the page. It
+     * stays open while chapters are picked, so the document stays visible
+     * beside it — the whole point of having it for a long piece of writing.
+     *
+     * On the side the writing hand is already on, like the rest of the chrome.
+     */
+    private fun drawerParams(): FrameLayout.LayoutParams {
+        val screen = resources.displayMetrics.widthPixels
+        val width = Scale.mmInt(64f)
+            .coerceAtLeast((screen * 0.30f).toInt())
+            .coerceAtMost((screen * 0.55f).toInt())
+        val lp = FrameLayout.LayoutParams(width, ViewGroup.LayoutParams.MATCH_PARENT)
+        lp.gravity = if (prefs.leftHanded) Gravity.START else Gravity.END
+        return lp
     }
 
     private fun sheetParams(): FrameLayout.LayoutParams {
@@ -282,6 +302,7 @@ class MainActivity : Activity() {
 
         sheet.onDismiss = { closeSheets() }
         settings.onDismiss = { closeSheets() }
+        contents.onDismiss = { closeSheets() }
         settings.onChanged = {
             Scale.init(this, prefs)
             editor.applyMetrics()
@@ -600,6 +621,7 @@ class MainActivity : Activity() {
     private fun hidePanels() {
         sheet.hide()
         settings.hide()
+        contents.hide()
         scrim.visibility = View.GONE
     }
 
@@ -613,7 +635,8 @@ class MainActivity : Activity() {
     }
 
     private fun sheetsOpen() =
-        sheet.visibility == View.VISIBLE || settings.visibility == View.VISIBLE
+        sheet.visibility == View.VISIBLE || settings.visibility == View.VISIBLE ||
+                contents.visibility == View.VISIBLE
 
     private fun showPalette() {
         settings.hide()
@@ -694,6 +717,38 @@ class MainActivity : Activity() {
         }
         sheet.onFreeText = null
         sheet.show()
+    }
+
+    /**
+     * The table of contents, as a drawer that stays open. Picking a heading
+     * moves the document behind it and leaves the list where it is, so a book
+     * can be walked chapter by chapter without reopening the panel each time.
+     */
+    private fun showContents() {
+        if (contents.visibility == View.VISIBLE) { closeSheets(); return }
+        sheet.hide()
+        settings.hide()
+
+        val heads = MarkdownStyler.outline(editor.text)
+        val items = heads.map {
+            ListSheet.Item(it.title, "", indent = it.level - 1, payload = it.offset)
+        }
+        scrim.visibility = View.VISIBLE
+        contents.configure(
+            if (heads.isEmpty()) "Contents" else "Contents · ${heads.size}",
+            "Filter…",
+            items,
+            "No headings yet. Start a line with # to make one."
+        )
+        contents.onFreeText = null
+        contents.onPick = { item ->
+            (item.payload as? Int)?.let { off ->
+                editor.setSelection(off.coerceIn(0, editor.text.length))
+                editor.post { editor.centreCaret() }
+            }
+            // Deliberately still open: the next chapter is one more tap away.
+        }
+        contents.show()
     }
 
     private fun showSettings() {
@@ -825,6 +880,7 @@ class MainActivity : Activity() {
         Cmd("Undo", "Ctrl Z") { if (!editor.undo()) flash("Nothing to undo") },
         Cmd("Redo", "Ctrl Shift Z") { if (!editor.redo()) flash("Nothing to redo") },
         Cmd("Outline", "Ctrl Shift O") { showOutline() },
+        Cmd("Table of contents", "Ctrl T") { showContents() },
         Cmd("Find…", "Ctrl F") { openFind(false) },
         Cmd("Replace…", "Ctrl H") { openFind(true) },
         Cmd("Settings", "Ctrl ,") { showSettings() },
@@ -1028,7 +1084,7 @@ class MainActivity : Activity() {
                 "Open the link under the caret"
             KeyEvent.KEYCODE_K -> if (shift) "Code block" else "Link"
             KeyEvent.KEYCODE_L -> if (shift) "Bullet list" else null
-            KeyEvent.KEYCODE_T -> if (shift) "Task list" else null
+            KeyEvent.KEYCODE_T -> if (shift) "Task list" else "Table of contents"
             KeyEvent.KEYCODE_Q -> if (shift) "Blockquote" else null
             KeyEvent.KEYCODE_H -> if (shift) "Horizontal rule" else "Replace…"
             KeyEvent.KEYCODE_R -> if (shift) "Rotate screen" else "Refresh screen"

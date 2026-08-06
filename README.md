@@ -130,7 +130,8 @@ memorising.
 | **Ctrl N / Ctrl O / Ctrl S** | new, open, save |
 | **Ctrl Z / Ctrl Shift Z** | undo, redo |
 | **Ctrl F / Ctrl H / Ctrl G** | find, replace, find next |
-| **Ctrl Shift O** | outline, jump to any heading |
+| **Ctrl T** | table of contents — a drawer that stays open |
+| **Ctrl Shift O** | outline, type to jump to a heading |
 | **Ctrl ,** | settings |
 | **Ctrl = / Ctrl -** | interface bigger, smaller |
 | **Ctrl B / Ctrl I / Ctrl E** | bold, italic, inline code |

@@ -464,6 +464,91 @@ class ShortcutTest {
         )
     }
 
+    // ------------------------------------------------------------- contents
+
+    @Test
+    fun `ctrl T opens the table of contents and lists every heading`() {
+        setDoc("# One\n\ntext\n\n## Two\n\nmore\n\n### Three\n", 0)
+        chord(KeyEvent.KEYCODE_T)
+
+        val texts = visibleTexts()
+        assertTrue("expected a contents panel, saw $texts", texts.any { it.startsWith("Contents") })
+        assertTrue(texts.contains("One"))
+        assertTrue(texts.contains("Two"))
+        assertTrue(texts.contains("Three"))
+    }
+
+    @Test
+    fun `the drawer sits down one edge rather than across the page`() {
+        setDoc("# One\n\n## Two\n", 0)
+        chord(KeyEvent.KEYCODE_T)
+        val drawer = findView(activity.window.decorView) {
+            it is ListSheet && it.isShown
+        } as ListSheet
+        val lp = drawer.layoutParams as android.widget.FrameLayout.LayoutParams
+        assertTrue("a drawer must not fill the width", lp.width > 0)
+        assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, lp.height)
+    }
+
+    @Test
+    fun `picking a chapter moves the document and leaves the drawer open`() {
+        val doc = "# One\n\ntext\n\n## Two\n\nmore\n"
+        setDoc(doc, 0)
+        chord(KeyEvent.KEYCODE_T)
+
+        val row = findView(activity.window.decorView) { v ->
+            v is android.widget.TextView && v.isShown && v.text.toString() == "Two"
+        }!!
+        var target: View = row
+        while (target.parent is View && !(target.parent as View).isClickable) {
+            target = target.parent as View
+        }
+        (target.parent as View).performClick()
+        idle()
+
+        assertEquals("the document should have jumped", doc.indexOf("## Two"), editor.selectionStart)
+        assertTrue(
+            "the drawer must stay open for the next chapter",
+            visibleTexts().any { it.startsWith("Contents") }
+        )
+    }
+
+    @Test
+    fun `ctrl T again closes it`() {
+        setDoc("# One\n", 0)
+        chord(KeyEvent.KEYCODE_T)
+        assertTrue(visibleTexts().any { it.startsWith("Contents") })
+        chord(KeyEvent.KEYCODE_T)
+        assertTrue(
+            "the same chord should put it away",
+            visibleTexts().none { it.startsWith("Contents") }
+        )
+    }
+
+    @Test
+    fun `escape closes the drawer`() {
+        setDoc("# One\n", 0)
+        chord(KeyEvent.KEYCODE_T)
+        plainKey(KeyEvent.KEYCODE_ESCAPE)
+        assertTrue(visibleTexts().none { it.startsWith("Contents") })
+    }
+
+    @Test
+    fun `a document with no headings says so instead of showing nothing`() {
+        setDoc("just prose, no headings at all\n", 0)
+        chord(KeyEvent.KEYCODE_T)
+        assertTrue(
+            visibleTexts().any { it.contains("No headings yet", ignoreCase = true) }
+        )
+    }
+
+    @Test
+    fun `ctrl shift T still makes a task list`() {
+        setDoc("buy milk", 0)
+        chord(KeyEvent.KEYCODE_T, shift = true)
+        assertEquals("- [ ] buy milk", body())
+    }
+
     // ---------------------------------------------------------------- modes
 
     @Test
