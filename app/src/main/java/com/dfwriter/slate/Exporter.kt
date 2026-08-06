@@ -85,9 +85,13 @@ object Exporter {
             if (page > 2000) break
         }
 
-        out.parentFile?.mkdirs()
-        out.outputStream().use { doc.writeTo(it) }
-        doc.close()
+        try {
+            out.parentFile?.mkdirs()
+            out.outputStream().use { doc.writeTo(it) }
+        } finally {
+            // close() must run even if the write fails, or the pages stay held.
+            doc.close()
+        }
         return out
     }
 
@@ -286,7 +290,9 @@ object Md {
     private fun inline(sIn: String): String {
         // Protect code spans from every other rule, exactly as Markdown requires.
         val codes = ArrayList<String>()
-        var s = Regex("(`+)([^`]+?)\\1").replace(sIn) { m ->
+        // The content may itself contain backticks, as in ``a ` b``, so it must
+        // not be [^`]: that stops at the inner backtick and mis-pairs the fence.
+        var s = Regex("(`+)(.+?)\\1(?!`)").replace(sIn) { m ->
             codes.add("<code>" + escape(m.groupValues[2]) + "</code>")
             "\u0000${codes.size - 1}\u0000"
         }

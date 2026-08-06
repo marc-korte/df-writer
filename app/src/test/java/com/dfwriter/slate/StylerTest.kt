@@ -147,6 +147,29 @@ class StylerTest {
     }
 
     @Test
+    fun `a tilde fence closes as reliably as a backtick one`() {
+        // The restyle range is only widened to the end of the document when the
+        // edit touches a fence. Recognising only backticks left every line after
+        // a ~~~ fence styled with a stale in-fence state.
+        val src = "before\n\n~~~\nfenced line\n~~~\n\nafter"
+        val sb = SpannableStringBuilder(src)
+        // Restyle a range confined to the fence line, as a keystroke there would.
+        val at = src.indexOf("~~~")
+        styler.restyleRange(sb, at, at + 3, at + 1)
+
+        val inside = src.indexOf("fenced")
+        assertTrue(
+            "content between tilde fences should be monospaced",
+            spansOn<MonoSpan>(sb, inside, inside + 6).isNotEmpty()
+        )
+        val after = src.indexOf("after")
+        assertTrue(
+            "text past the closing tilde fence must be ordinary prose",
+            spansOn<MonoSpan>(sb, after, after + 5).isEmpty()
+        )
+    }
+
+    @Test
     fun `a hash inside a fence is not turned into a heading`() {
         val src = "```\n# not a heading\n```"
         val sb = style(src)

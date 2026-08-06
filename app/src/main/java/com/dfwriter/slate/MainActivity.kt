@@ -8,7 +8,6 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -45,6 +44,7 @@ class MainActivity : Activity() {
     private var editsSinceRefresh = 0
     private var lastFindIndex = -1
     private var statusMessage: String? = null
+    private var chromeStale = false
 
     private val autosave = object : Runnable {
         override fun run() {
@@ -219,11 +219,17 @@ class MainActivity : Activity() {
         sheet.onDismiss = { closeSheets() }
         settings.onDismiss = { closeSheets() }
         settings.onChanged = {
+            val before = Scale.ui
             Scale.init(this, prefs)
             editor.applyMetrics()
             applyOrientation()
             applyChrome()
             updateStatus()
+            // The status bar and the panels bake their sizes in when they are
+            // built, so a scale change only reaches them through a rebuild.
+            // Deferred to when the panel closes, so stepping the value does not
+            // tear the panel down under the user's finger.
+            if (Scale.ui != before) chromeStale = true
         }
 
         findBar.onDismiss = { findBar.hide(); editor.requestFocus() }
@@ -249,10 +255,8 @@ class MainActivity : Activity() {
         prefs.leftHanded = left
         // The status bar and the stepper rows are built mirrored, so the view
         // tree has to be rebuilt for the change to show.
-        ui.post {
-            rebuildChrome()
-            flash(if (left) "Left-handed layout" else "Right-handed layout")
-        }
+        flash(if (left) "Left-handed layout" else "Right-handed layout")
+        scheduleChromeRebuild()
     }
 
     private fun setOrientation(o: Orientation) {
@@ -274,7 +278,6 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------- document
 
     private fun requestStorageIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         val need = arrayOf(
             Manifest.permission.READ_EXTERNAL_STORAGE,
             Manifest.permission.WRITE_EXTERNAL_STORAGE
@@ -394,11 +397,20 @@ class MainActivity : Activity() {
 
     // --------------------------------------------------------------- panels
 
-    private fun closeSheets() {
+    /** Hides the panels without triggering a pending rebuild. */
+    private fun hidePanels() {
         sheet.hide()
         settings.hide()
         scrim.visibility = View.GONE
+    }
+
+    private fun closeSheets() {
+        hidePanels()
         editor.requestFocus()
+        if (chromeStale) {
+            chromeStale = false
+            scheduleChromeRebuild()
+        }
     }
 
     private fun sheetsOpen() =
@@ -444,13 +456,13 @@ class MainActivity : Activity() {
         }
         sheet.onFreeText = { name ->
             closeSheets()
-            val dir = browseDir ?: store.libraryRoot()
-            val existing = File(dir, DocStore.ensureExt(name))
+            val target = browseDir ?: store.libraryRoot()
+            val existing = File(target, DocStore.ensureExt(name))
             if (existing.exists()) {
                 openWithSave(existing)
             } else {
                 if (store.dirty) saveQuietly()
-                val made = store.createNamed(dir, name)
+                val made = store.createNamed(target, name)
                 if (made != null) {
                     loadInto(made)
                     flash("Created ${made.name}")
@@ -688,12 +700,21 @@ class MainActivity : Activity() {
 
     private fun nudgeScale(dir: Int) {
         Scale.setUiScale(prefs, Scale.ui + dir * Scale.UI_STEP)
-        // Rebuilding swaps the whole view tree, so it must not happen while the
-        // key event that triggered it is still being dispatched through it.
-        ui.post {
-            rebuildChrome()
-            flash("Interface ${Math.round(Scale.ui * 100)}%")
-        }
+        flash("Interface ${Math.round(Scale.ui * 100)}%")
+        scheduleChromeRebuild()
+    }
+
+    private val rebuildChromeTask = Runnable { rebuildChrome() }
+
+    /**
+     * Rebuilding swaps the whole view tree, so it must not happen while the key
+     * event that triggered it is still being dispatched through that tree.
+     * Coalesced, because holding Ctrl+= would otherwise rebuild and restyle the
+     * document once per repeat.
+     */
+    private fun scheduleChromeRebuild() {
+        ui.removeCallbacks(rebuildChromeTask)
+        ui.post(rebuildChromeTask)
     }
 
     /** Status bar and panels bake in point sizes, so a scale change rebuilds them. */
@@ -702,6 +723,11 @@ class MainActivity : Activity() {
         val body = editor.text.toString()
         val scrollY = editor.scrollY
         val wasDirty = store.dirty
+        // The find bar is part of the tree being replaced, so an open search
+        // would otherwise vanish along with whatever had been typed into it.
+        val findWasOpen = findBar.visibility == View.VISIBLE
+        val findQuery = findBar.queryText()
+
         root.removeAllViews()
         buildUi()
         setContentView(root)
@@ -712,6 +738,11 @@ class MainActivity : Activity() {
         editor.requestFocus()
         editor.post { editor.scrollTo(0, scrollY) }
         store.dirty = wasDirty
+
+        if (findWasOpen) {
+            findBar.setQuery(findQuery)
+            findBar.show()
+        }
     }
 
     // ------------------------------------------------------------ shortcuts
@@ -802,7 +833,9 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- find
 
     private fun openFind(withReplace: Boolean) {
-        closeSheets()
+        // hidePanels rather than closeSheets: a deferred chrome rebuild would
+        // replace the find bar moments after it was shown.
+        hidePanels()
         findBar.show()
         val sel = editor.text.subSequence(
             min(editor.selectionStart, editor.selectionEnd),

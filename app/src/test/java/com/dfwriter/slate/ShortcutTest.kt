@@ -243,6 +243,30 @@ class ShortcutTest {
     }
 
     @Test
+    fun `a rebuild keeps an open find bar and what was typed into it`() {
+        setDoc("find the word here", 0)
+        chord(KeyEvent.KEYCODE_F)
+        val bar = findView(activity.window.decorView) { it is FindBar } as FindBar
+        assertEquals(View.VISIBLE, bar.visibility)
+        bar.setQuery("word")
+        idle()
+
+        chord(KeyEvent.KEYCODE_EQUALS)   // forces a full chrome rebuild
+        val after = findView(activity.window.decorView) { it is FindBar } as FindBar
+        assertEquals("the search should survive the rebuild", View.VISIBLE, after.visibility)
+        assertEquals("word", after.queryText())
+    }
+
+    @Test
+    fun `repeated scale changes settle on the right size`() {
+        val start = Scale.ui
+        repeat(4) { chord(KeyEvent.KEYCODE_EQUALS) }
+        idle()
+        assertTrue("four steps up should still land above the start", Scale.ui > start)
+        assertEquals(Scale.ui, Prefs(activity).uiScale, 0.001f)
+    }
+
+    @Test
     fun `rebuilding after a scale change keeps the document and the caret`() {
         setDoc("# Kept heading\n\nkept body text", 8)
         chord(KeyEvent.KEYCODE_EQUALS)

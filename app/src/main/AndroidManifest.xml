@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
@@ -27,7 +28,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <intent-filter>
+            <!--
+                Matches on MIME type alone, which is how a file manager hands
+                over a content:// URI. AppLinkUrlError is suppressed because it
+                is asking for a host and scheme to verify as a web link, and
+                this filter opens files rather than links.
+            -->
+            <intent-filter tools:ignore="AppLinkUrlError">
                 <action android:name="android.intent.action.VIEW" />
                 <action android:name="android.intent.action.EDIT" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -36,14 +43,22 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
 
+            <!--
+                For file managers that hand over a Markdown file typed as
+                application/octet-stream. The path pattern keeps the wildcard
+                type from making this app a candidate for opening every file on
+                the device, and BROWSABLE is deliberately absent: this handles
+                files, not web links.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <action android:name="android.intent.action.EDIT" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="file" />
+                <data android:scheme="content" />
                 <data android:mimeType="*/*" />
                 <data android:pathPattern=".*\\.md" />
+                <data android:pathPattern=".*\\.markdown" />
             </intent-filter>
         </activity>
     </application>

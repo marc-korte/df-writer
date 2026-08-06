@@ -62,7 +62,19 @@ class SizeSpan(private val px: Int) : CharacterStyle(), UpdateAppearance, SlateS
 class WeightSpan(private val style: Int) : CharacterStyle(), UpdateAppearance, SlateSpan {
     override fun updateDrawState(tp: TextPaint) {
         val old = tp.typeface
-        val want = if (old == null) style else old.style or style
+        // Combine with whatever weight is already in force, so italic inside a
+        // heading comes out bold italic rather than replacing the bold. Resolved
+        // to a named constant because Typeface.create takes one of the four,
+        // not an arbitrary combination of bits.
+        val combined = (old?.style ?: Typeface.NORMAL) or style
+        val bold = combined and Typeface.BOLD != 0
+        val italic = combined and Typeface.ITALIC != 0
+        val want = when {
+            bold && italic -> Typeface.BOLD_ITALIC
+            bold -> Typeface.BOLD
+            italic -> Typeface.ITALIC
+            else -> Typeface.NORMAL
+        }
         tp.typeface = Typeface.create(old ?: Typeface.DEFAULT, want)
     }
 }

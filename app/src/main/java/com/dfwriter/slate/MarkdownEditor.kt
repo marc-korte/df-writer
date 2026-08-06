@@ -223,7 +223,7 @@ class MarkdownEditor @JvmOverloads constructor(
 
     private fun step(from: ArrayList<Change>, to: ArrayList<Change>, undoing: Boolean): Boolean {
         if (from.isEmpty()) return false
-        val c = from.removeAt(from.size - 1)
+        val c = from.last()
         val e = text ?: return false
         val old = if (undoing) c.after else c.before
         val new = if (undoing) c.before else c.after
@@ -231,6 +231,9 @@ class MarkdownEditor @JvmOverloads constructor(
             from.clear(); to.clear()
             return false
         }
+        // Popped only once the edit is known to be applicable, so a rejected
+        // step leaves the history intact rather than quietly dropping it.
+        from.removeAt(from.size - 1)
         applyingHistory = true
         try {
             e.replace(c.start, c.start + old.length, new)
@@ -383,7 +386,9 @@ class MarkdownEditor @JvmOverloads constructor(
 
     fun centreCaret() {
         val l = layout ?: return
-        val line = l.getLineForOffset(selectionStart)
+        // The layout can lag the buffer for a frame after setText, so the caret
+        // offset is clamped to what has actually been laid out.
+        val line = l.getLineForOffset(selectionStart.coerceIn(0, l.text.length))
         val target = l.getLineTop(line) - (height / 2) + totalPaddingTop
         val maxScroll = max(0, l.height + totalPaddingTop + totalPaddingBottom - height)
         scrollTo(0, target.coerceIn(0, maxScroll))

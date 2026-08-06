@@ -71,8 +71,9 @@ your eyes, two keystrokes fix it permanently.
 - **Left- or right-handed.** The device's own handedness setting is not readable
   by third-party apps, so Slate has its own; controls sit on the side your
   writing hand is already on. Defaults to left-handed.
-- **Not keyboard-only.** Tapping the status bar opens the command palette, so
-  everything is reachable when the keyboard is not paired.
+- **Not keyboard-only.** Tapping the status bar opens the command palette and
+  tapping outside a panel closes it, so everything is reachable when the
+  keyboard is not paired — which is exactly when you need it most.
 - **Zero third-party dependencies.** No AndroidX, no Compose, no Play Services.
   Framework views start faster and repaint more predictably, and the APK is
   683 KB.
@@ -145,7 +146,7 @@ memorising.
 | **Ctrl R** | flash the panel to clear ghosting |
 | **Ctrl W** | word count and reading time |
 | **Ctrl Shift M / Ctrl Shift P** | export HTML, export PDF |
-| **Esc** | close any panel |
+| **Esc**, or a tap outside | close any panel |
 
 ## What it supports
 
@@ -180,7 +181,7 @@ your own key instead, copy `keystore.properties.example` to
 
 ### Tests
 
-77 tests, all passing. They cover the parts that would otherwise fail silently:
+84 tests, all passing. They cover the parts that would otherwise fail silently:
 
 - **`PureLogicTest`** — the density decision against a truthful Manta, a Manta
   reporting a false 160 dpi, garbage metrics and an ordinary high-density phone;

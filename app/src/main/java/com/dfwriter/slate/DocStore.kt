@@ -26,7 +26,9 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
         val saved = prefs.libraryPath
         if (saved.isNotEmpty()) {
             val f = File(saved)
-            if (f.isDirectory && f.canRead()) return f
+            // canWrite, not canRead: a readable but unwritable folder would be
+            // accepted here and then fail every save from that point on.
+            if (f.isDirectory && f.canWrite()) return f
         }
         for (candidate in defaultCandidates()) {
             if (candidate.isDirectory && candidate.canWrite()) return candidate

@@ -305,11 +305,17 @@ class MarkdownStyler(private val prefs: Prefs) {
         }
     }
 
+    /**
+     * Tilde fences count too. Missing them here left every line after a `~~~`
+     * styled with a stale in-fence state, because the restyle was never widened
+     * to the end of the document.
+     */
     private fun rangeTouchesFence(text: CharSequence, from: Int, to: Int): Boolean {
         var i = from
         while (i < to && i < text.length) {
-            if (text[i] == '`' && i + 2 < text.length &&
-                text[i + 1] == '`' && text[i + 2] == '`'
+            val c = text[i]
+            if ((c == '`' || c == '~') && i + 2 < text.length &&
+                text[i + 1] == c && text[i + 2] == c
             ) return true
             i++
         }

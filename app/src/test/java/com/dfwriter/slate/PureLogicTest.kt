@@ -135,6 +135,22 @@ class PureLogicTest {
     }
 
     @Test
+    fun `a code span may itself contain backticks`() {
+        // Doubled fences exist precisely so code can contain a backtick. Content
+        // matched as [^`] stops at the inner one and mis-pairs the fence.
+        val html = Md.render("Use ``a ` b`` in code.\n")
+        assertTrue(html, html.contains("<code>a ` b</code>"))
+    }
+
+    @Test
+    fun `adjacent code spans on one line stay separate`() {
+        val html = Md.render("`one` and `two`\n")
+        assertTrue(html, html.contains("<code>one</code>"))
+        assertTrue(html, html.contains("<code>two</code>"))
+        assertTrue("the gap must not be swallowed", html.contains("and"))
+    }
+
+    @Test
     fun `prose containing a placeholder shaped string is not corrupted`() {
         // The renderer parks code spans behind sentinels while it works; text
         // that happens to look like one must survive untouched.
