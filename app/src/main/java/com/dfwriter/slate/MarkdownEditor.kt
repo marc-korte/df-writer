@@ -216,7 +216,9 @@ class MarkdownEditor @JvmOverloads constructor(
                 // must follow the caret now, not keep re-placing the jump.
                 if (arrival != null) clearArrival.run()
                 settleTarget = -1
-                record(changeStart, removed, inserted)
+                // History speaks document offsets, like everything else that
+                // must survive the page moving out from under it.
+                record(pageStart + changeStart, removed, inserted)
                 onEdit?.invoke(e.length)
                 val big = (changeEnd - changeStart) > 240
                 scheduleRestyle(changeStart, changeEnd, if (big) 110L else 0L)
@@ -546,7 +548,19 @@ class MarkdownEditor @JvmOverloads constructor(
         val e = text ?: return false
         val old = if (undoing) c.after else c.before
         val new = if (undoing) c.before else c.after
-        if (c.start > e.length || c.start + old.length > e.length) {
+        // Bounds against the DOCUMENT, not the page: a change outside the
+        // page is one the page will move to, not an invalid one — testing
+        // against the Editable here would wipe both stacks the first time
+        // the page had moved away from an old edit.
+        if (c.start > docLength() || c.start + old.length > docLength()) {
+            from.clear(); to.clear()
+            return false
+        }
+        // The page must hold the change before it can be applied. While the
+        // page is the whole document this never fires; the splice engine
+        // replaces it with a real page move.
+        val local = c.start - pageStart
+        if (local < 0 || local + old.length > e.length) {
             from.clear(); to.clear()
             return false
         }
@@ -555,8 +569,8 @@ class MarkdownEditor @JvmOverloads constructor(
         from.removeAt(from.size - 1)
         applyingHistory = true
         try {
-            e.replace(c.start, c.start + old.length, new)
-            setSelection((c.start + new.length).coerceIn(0, e.length))
+            e.replace(local, local + old.length, new)
+            setSelection((local + new.length).coerceIn(0, e.length))
         } finally {
             applyingHistory = false
         }
@@ -564,7 +578,7 @@ class MarkdownEditor @JvmOverloads constructor(
         // The range that changed, not the document. A full restyle clears and
         // re-adds every span in the buffer, which costs more the longer the
         // piece is — undoing a character in a novel used to pay for the novel.
-        restyleAround(c.start, c.start + new.length)
+        restyleAround(local, local + new.length)
         return true
     }
 

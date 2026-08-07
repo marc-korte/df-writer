@@ -27,6 +27,14 @@ class MarkdownStyler(private val prefs: Prefs) {
     /** Set by the exporter to conceal markers regardless of the live preference. */
     var forceHideMarkers: Boolean? = null
 
+    /**
+     * Whether offset 0 of the buffer is already inside a fenced code block.
+     * False while the buffer is a whole document; the paged editor sets it
+     * when the page it hands this styler opens mid-fence, so the fence
+     * arithmetic below inherits the truth about everything above the page.
+     */
+    var baseFenceParity: Boolean = false
+
     /** Width of the text column in pixels, used to lay out tables and images. */
     var contentWidthPx: Int = 0
 
@@ -605,7 +613,7 @@ class MarkdownStyler(private val prefs: Prefs) {
             if (s >= offset) break
             count++
         }
-        return count % 2 == 1
+        return (count % 2 == 1) != baseFenceParity
     }
 
     companion object {
