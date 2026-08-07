@@ -160,9 +160,9 @@ class MainActivity : Activity() {
         // While the recovery prompt is unanswered the editor holds the text
         // from disk, and writing that over the shadow copy would destroy the
         // very draft being offered.
-        if (!recoveryPending) store.writeScratch(editor.text.toString())
-        prefs.lastCaret = editor.selectionStart
-        store.current?.let { prefs.rememberCaret(it.absolutePath, editor.selectionStart) }
+        if (!recoveryPending) store.writeScratch(editor.documentText())
+        prefs.lastCaret = editor.globalSelectionStart()
+        store.current?.let { prefs.rememberCaret(it.absolutePath, editor.globalSelectionStart()) }
     }
 
     override fun onDestroy() {
@@ -337,6 +337,11 @@ class MainActivity : Activity() {
             if (Scale.ui != chromeUi || prefs.bodyPt != chromeBodyPt) chromeStale = true
         }
 
+        editor.onMirrorRepair = {
+            // Should never fire. If it does, the page won and the document
+            // was repaired before the save — say so rather than hide it.
+            flash("Recovered the page into the document")
+        }
         findBar.onDismiss = { findBar.hide(); editor.requestFocus() }
         findBar.onFind = { q, fwd -> findNext(q, fwd) }
         findBar.onReplaceOne = { q, r -> replaceOne(q, r) }
@@ -416,7 +421,7 @@ class MainActivity : Activity() {
                 // slot belongs to whichever file was open at the last pause,
                 // which after a crash mid-switch is not this one.
                 if (prefs.caretFor(f.absolutePath) == 0 && prefs.lastCaret > 0) {
-                    editor.setSelection(prefs.lastCaret.coerceIn(0, editor.text.length))
+                    editor.setSelectionGlobal(prefs.lastCaret.coerceIn(0, editor.docLength()))
                     editor.post { editor.centreCaret() }
                 }
                 return
@@ -435,8 +440,8 @@ class MainActivity : Activity() {
      * than quietly discarding the difference.
      */
     private fun offerRecovery() {
-        val recovered = store.recoverableText(editor.text.toString()) ?: return
-        val onDisk = editor.text.toString()
+        val recovered = store.recoverableText(editor.documentText()) ?: return
+        val onDisk = editor.documentText()
 
         sheet.configure(
             "Unsaved text was recovered",
@@ -470,7 +475,7 @@ class MainActivity : Activity() {
             if (item.payload == RECOVER_RESTORE) {
                 editor.setText(recovered)
                 editor.restyleNow()
-                editor.setSelection(recovered.length.coerceIn(0, editor.text.length))
+                editor.setSelectionGlobal(recovered.length.coerceIn(0, editor.docLength()))
                 editor.clearHistory()
                 store.dirty = true
                 if (saveQuietly()) flash("Recovered text restored and saved")
@@ -573,7 +578,7 @@ class MainActivity : Activity() {
         // The document being left keeps its place, so coming back to it — the
         // next chapter over, or tomorrow — lands on the sentence being worked
         // on rather than the top of the page.
-        store.current?.let { prefs.rememberCaret(it.absolutePath, editor.selectionStart) }
+        store.current?.let { prefs.rememberCaret(it.absolutePath, editor.globalSelectionStart()) }
         val body = runCatching { store.open(f) }.getOrElse {
             flash("Could not read ${f.name}")
             return
@@ -589,8 +594,8 @@ class MainActivity : Activity() {
         // test will not show it. A document opens where the caret last was in
         // it, which is its beginning if it has never been open here.
         editor.requestFocus()
-        val caret = prefs.caretFor(f.absolutePath).coerceIn(0, editor.text.length)
-        editor.setSelection(caret)
+        val caret = prefs.caretFor(f.absolutePath).coerceIn(0, editor.docLength())
+        editor.setSelectionGlobal(caret)
         if (caret > 0) editor.post { editor.centreCaret() }
         editor.clearHistory()
         editsSinceRefresh = 0
@@ -610,7 +615,7 @@ class MainActivity : Activity() {
             flash("No new document — the recovered draft could not be kept safe")
             return
         }
-        store.current?.let { prefs.rememberCaret(it.absolutePath, editor.selectionStart) }
+        store.current?.let { prefs.rememberCaret(it.absolutePath, editor.globalSelectionStart()) }
         val f = store.createAndOpen(store.libraryRoot())
         editor.setText("")
         editor.restyleNow()
@@ -645,7 +650,7 @@ class MainActivity : Activity() {
         // Anything already on its way to the card carries older text, and a
         // save made here must be the last word rather than the first.
         drainSaves()
-        val body = editor.text.toString()
+        val body = editor.documentText()
         saveTarget(body) ?: return false
         if (store.save(body) == null) {
             store.writeScratch(body)
@@ -662,7 +667,7 @@ class MainActivity : Activity() {
      * document is still changed here, where it is read from.
      */
     private fun saveInBackground() {
-        val body = editor.text.toString()
+        val body = editor.documentText()
         val f = saveTarget(body) ?: return
         // Cleared against the snapshot rather than when the write lands. An
         // edit made while the write is in flight is not in the text being
@@ -718,7 +723,7 @@ class MainActivity : Activity() {
         }
         if (cachedWords <= limit) return
 
-        val body = editor.text.toString()
+        val body = editor.documentText()
         dividing = true
         flash("Dividing into parts…")
         // Planning is pure computation over a copy, and on a book-sized part
@@ -732,7 +737,7 @@ class MainActivity : Activity() {
                 try {
                     if (plan == null) return@post
                     if (store.current?.absolutePath != f.absolutePath) return@post
-                    if (!editor.text.contentEquals(body)) return@post
+                    if (editor.documentText() != body) return@post
                     // The file has to match the buffer before it is taken apart.
                     if (!saveQuietly()) return@post
                     // A part of an already-divided piece is divided again where
@@ -748,7 +753,7 @@ class MainActivity : Activity() {
                     // Carry on in the part the caret was in, at the same place
                     // in it, so that dividing a book mid-sentence does not move
                     // the writer.
-                    val caret = editor.selectionStart
+                    val caret = editor.globalSelectionStart()
                     var consumed = 0
                     var part = 0
                     for ((i, p) in plan.parts.withIndex()) {
@@ -760,7 +765,7 @@ class MainActivity : Activity() {
                     val within = (caret - consumed).coerceAtLeast(0)
 
                     loadInto(landing)
-                    editor.setSelection(within.coerceIn(0, editor.text.length))
+                    editor.setSelectionGlobal(within.coerceIn(0, editor.docLength()))
                     editor.post { editor.centreCaret() }
                     flash("Split into ${plan.parts.size} parts to stay quick")
                 } finally {
@@ -911,7 +916,7 @@ class MainActivity : Activity() {
 
     private fun showOutline() {
         settings.hide()
-        val heads = MarkdownStyler.outline(editor.text)
+        val heads = MarkdownStyler.outline(editor.documentText())
         val items = heads.map {
             ListSheet.Item(it.title, "H${it.level}", indent = it.level - 1, payload = it.offset)
         }
@@ -949,7 +954,7 @@ class MainActivity : Activity() {
         var headings = 0
 
         if (folder == null) {
-            for (h in MarkdownStyler.outline(editor.text)) {
+            for (h in MarkdownStyler.outline(editor.documentText())) {
                 items.add(ListSheet.Item(h.title, "", indent = h.level - 1, payload = h.offset))
                 headings++
             }
@@ -959,7 +964,7 @@ class MainActivity : Activity() {
                 // The open part is read from the buffer, which may be ahead of
                 // what is on the card.
                 val text: CharSequence =
-                    if (open) editor.text
+                    if (open) editor.documentText()
                     else runCatching { store.read(chapter) }.getOrDefault("")
                 val heads = MarkdownStyler.outline(text)
                 items.add(
@@ -1238,12 +1243,12 @@ class MainActivity : Activity() {
         },
         Cmd("Refresh screen", "Ctrl R") { flashRefresh() },
         Cmd("Word count", "Ctrl W") {
-            val w = DocStore.countWords(editor.text)
+            val w = DocStore.countWords(editor.documentText())
             // The status bar shows the whole book; a flash that showed only
             // the open part with no label would look like a different answer
             // to the same question.
             val book = if (othersWords > 0) " · ${w + othersWords} in the book" else ""
-            flash("$w words · ${editor.text.length} characters · ${readingTime(w)}$book")
+            flash("$w words · ${editor.docLength()} characters · ${readingTime(w)}$book")
         },
         Cmd("Export to HTML", "Ctrl Shift M") { exportHtml() },
         Cmd("Export to PDF", "Ctrl Shift P") { exportPdf() }
@@ -1279,8 +1284,8 @@ class MainActivity : Activity() {
 
     /** Status bar and panels bake in point sizes, so a scale change rebuilds them. */
     private fun rebuildChrome() {
-        val caret = editor.selectionStart
-        val body = editor.text.toString()
+        val caret = editor.globalSelectionStart()
+        val body = editor.documentText()
         val scrollY = editor.scrollY
         val wasDirty = store.dirty
         // The find bar is part of the tree being replaced, so an open search
@@ -1295,7 +1300,7 @@ class MainActivity : Activity() {
         applyChrome()
         editor.setText(body)
         editor.restyleNow()
-        editor.setSelection(caret.coerceIn(0, editor.text.length))
+        editor.setSelectionGlobal(caret.coerceIn(0, editor.docLength()))
         editor.requestFocus()
         editor.post { editor.scrollTo(0, scrollY) }
         store.dirty = wasDirty
@@ -1422,18 +1427,18 @@ class MainActivity : Activity() {
         // replace the find bar moments after it was shown.
         hidePanels()
         findBar.show()
-        val sel = editor.text.subSequence(
-            min(editor.selectionStart, editor.selectionEnd),
-            max(editor.selectionStart, editor.selectionEnd)
-        ).toString()
+        val sel = editor.documentText().substring(
+            min(editor.globalSelectionStart(), editor.globalSelectionEnd()),
+            max(editor.globalSelectionStart(), editor.globalSelectionEnd())
+        )
         if (sel.isNotEmpty() && sel.length < 80) findBar.setQuery(sel)
         findBar.setStatus(if (withReplace) "Tab to the replace field" else "")
     }
 
     private fun findNext(q: String, forward: Boolean) {
-        val hay = editor.text.toString()
+        val hay = editor.documentText()
         if (q.isEmpty() || hay.isEmpty()) return
-        val from = if (forward) max(editor.selectionEnd, 0) else max(editor.selectionStart - 1, 0)
+        val from = if (forward) max(editor.globalSelectionEnd(), 0) else max(editor.globalSelectionStart() - 1, 0)
         var idx = if (forward) hay.indexOf(q, from, ignoreCase = true)
         else hay.lastIndexOf(q, from, ignoreCase = true)
         if (idx < 0) {
@@ -1444,7 +1449,7 @@ class MainActivity : Activity() {
             findBar.setStatus("")
         }
         if (idx < 0) return
-        editor.setSelection(idx, idx + q.length)
+        editor.setSelectionGlobal(idx, idx + q.length)
         editor.post { editor.centreCaret() }
     }
 
@@ -1454,6 +1459,8 @@ class MainActivity : Activity() {
         val e = max(editor.selectionStart, editor.selectionEnd)
         val sel = editor.text.subSequence(s, e).toString()
         if (sel.equals(q, ignoreCase = true)) {
+            // Page-local on purpose: the selection lives in the Editable, and
+            // the replace must land exactly where the writer sees it.
             editor.text.replace(s, e, r)
             editor.setSelection(s + r.length)
         }
@@ -1462,15 +1469,15 @@ class MainActivity : Activity() {
 
     private fun replaceAll(q: String, r: String) {
         if (q.isEmpty()) return
-        val body = editor.text.toString()
+        val body = editor.documentText()
         var count = 0
         var i = body.indexOf(q, 0, ignoreCase = true)
         while (i >= 0) { count++; i = body.indexOf(q, i + q.length, ignoreCase = true) }
         if (count == 0) { findBar.setStatus("no match"); return }
-        val caret = editor.selectionStart
+        val caret = editor.globalSelectionStart()
         editor.setText(body.replace(q, r, ignoreCase = true))
         editor.restyleNow()
-        editor.setSelection(caret.coerceIn(0, editor.text.length))
+        editor.setSelectionGlobal(caret.coerceIn(0, editor.docLength()))
         findBar.setStatus("replaced $count")
     }
 
@@ -1498,7 +1505,7 @@ class MainActivity : Activity() {
         if (folder == null) {
             // The buffer is snapshotted here, on the main thread it belongs
             // to; the closure hands the copy to whichever thread exports it.
-            val body = editor.text.toString()
+            val body = editor.documentText()
             return Pair({ body }, f?.nameWithoutExtension ?: "document")
         }
         if (store.dirty && !saveQuietly()) {
@@ -1626,7 +1633,7 @@ class MainActivity : Activity() {
     private fun wordCount(): Int = cachedWords + othersWords
 
     private fun recount() {
-        cachedWords = DocStore.countWords(editor.text)
+        cachedWords = DocStore.countWords(editor.documentText())
     }
 
     /**
@@ -1806,7 +1813,7 @@ class MainActivity : Activity() {
         // the heading's own punctuation could never match it.
         val want = anchor.trim().lowercase().replace(Regex("[^a-z0-9 -]"), "").trim()
             .replace(' ', '-')
-        val heading = MarkdownStyler.outline(editor.text).firstOrNull {
+        val heading = MarkdownStyler.outline(editor.documentText()).firstOrNull {
             it.title.lowercase().replace(Regex("[^a-z0-9 -]"), "").trim()
                 .replace(' ', '-') == want
         }

@@ -47,6 +47,98 @@ class MarkdownEditor @JvmOverloads constructor(
     private var winStart = 0
     private var winEnd = 0
 
+    // ------------------------------------------------------ document model
+
+    /**
+     * The whole document. The Editable is a window onto it — [pageStart,
+     * pageEnd) — held in sync by mirroring every change the Editable sees,
+     * in onTextChanged, before any other code can react. For now the window
+     * is always the whole document; the splice engine that moves it lands
+     * behind a setting. The point of the split is the device: its framework
+     * re-lays-out everything below an edit, so what the Editable holds is
+     * what a keystroke costs, and one day soon it will hold only a page.
+     *
+     * Everything outside this class speaks GLOBAL offsets. The Editable's
+     * own coordinates stop at this file's walls.
+     */
+    private val docText = StringBuilder()
+    private var pageStart = 0
+    private var pageEnd = 0
+    private var splicing = false
+    private var inSetText = false
+
+    /** Called when a save found the mirror and the page disagreeing. */
+    var onMirrorRepair: (() -> Unit)? = null
+
+    fun docLength(): Int = docText.length
+
+    fun globalSelectionStart(): Int = pageStart + selectionStart
+
+    fun globalSelectionEnd(): Int = pageStart + selectionEnd
+
+    fun setSelectionGlobal(start: Int, end: Int = start) {
+        val e = text ?: return
+        setSelection(
+            (start - pageStart).coerceIn(0, e.length),
+            (end - pageStart).coerceIn(0, e.length)
+        )
+    }
+
+    /**
+     * The document as the file should hold it. Before handing it over, the
+     * page is compared against its slice of the mirror: a desynced mirror
+     * must never reach the card. On disagreement the Editable wins — it is
+     * what the writer saw — the mirror is repaired, and the owner is told.
+     */
+    fun documentText(): String {
+        val e = text
+        if (e != null) {
+            val len = e.length
+            // While the page is pinned to the whole document, the invariant is
+            // total: same bounds, same length, same characters. The splice
+            // engine will narrow this to the slice the page can vouch for.
+            var same = pageStart == 0 && pageEnd == docText.length && docText.length == len
+            if (same) {
+                for (i in 0 until len) {
+                    if (e[i] != docText[i]) { same = false; break }
+                }
+            }
+            if (!same) {
+                docText.setLength(0)
+                docText.append(e)
+                pageStart = 0
+                pageEnd = len
+                onMirrorRepair?.invoke()
+            }
+        }
+        return docText.toString()
+    }
+
+    /** For tests: the mirror as-is, no verification, no repair. */
+    internal fun documentTextRaw(): String = docText.toString()
+
+    override fun setText(text: CharSequence?, type: BufferType?) {
+        // Any setText that is not a splice means "this is now the whole
+        // document" — the app's own loads and rebuilds, and every framework
+        // path this app never calls. The reset happens before super so the
+        // watcher's mirror pass can be skipped rather than double-applied.
+        @Suppress("SENSELESS_COMPARISON")
+        if (docText != null && !splicing) {
+            docText.setLength(0)
+            docText.append(text ?: "")
+            pageStart = 0
+            pageEnd = docText.length
+            inSetText = true
+            try {
+                super.setText(text, type)
+            } finally {
+                inSetText = false
+            }
+            return
+        }
+        super.setText(text, type)
+    }
+
     fun bind(prefs: Prefs, styler: MarkdownStyler) {
         this.prefs = prefs
         this.styler = styler
@@ -101,6 +193,18 @@ class MarkdownEditor @JvmOverloads constructor(
             }
 
             override fun onTextChanged(s: CharSequence?, st: Int, before: Int, count: Int) {
+                // The mirror first, before any other code can nest another
+                // edit: what the Editable now holds is what the document
+                // holds. Skipped for setText (the override already reset the
+                // whole mirror) and for splices (a page swap is not a change
+                // to the document).
+                if (s != null && !inSetText && !splicing) {
+                    docText.replace(
+                        pageStart + st, pageStart + st + before,
+                        s.subSequence(st, st + count).toString()
+                    )
+                    pageEnd += count - before
+                }
                 changeStart = st
                 changeEnd = st + count
                 inserted = s?.subSequence(st, st + count)?.toString() ?: ""
