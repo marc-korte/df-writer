@@ -293,7 +293,74 @@ class MarkdownEditor @JvmOverloads constructor(
      */
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
         if (!imeWanted) return null
-        return super.onCreateInputConnection(outAttrs)
+        val ic = super.onCreateInputConnection(outAttrs) ?: return null
+        // The IME asks for text around the cursor with no particular limit —
+        // the device's IME passes what amounts to "all of it". At the end of a
+        // manuscript that is a whole-book copy per request, and an unbounded n
+        // can even fail the allocation outright. Clamped here, in one place,
+        // rather than trusting any IME to be reasonable.
+        return object : android.view.inputmethod.InputConnectionWrapper(ic, true) {
+            override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence? =
+                super.getTextBeforeCursor(n.coerceIn(0, EXTRACT_WINDOW), flags)
+
+            override fun getTextAfterCursor(n: Int, flags: Int): CharSequence? =
+                super.getTextAfterCursor(n.coerceIn(0, EXTRACT_WINDOW), flags)
+
+            override fun getExtractedText(
+                request: android.view.inputmethod.ExtractedTextRequest?, flags: Int
+            ): android.view.inputmethod.ExtractedText? =
+                // The monitor bit signs the IME up for a fresh extract on every
+                // edit — and those updates run through the framework's own
+                // extract path, which copies the whole buffer and cannot be
+                // overridden. Measured on the panel, that alone kept a
+                // keystroke linear in the length of the manuscript. Stripped
+                // here, the IME still gets its windowed extract on request and
+                // its selection updates; it simply is not fed the document
+                // again after every character.
+                super.getExtractedText(
+                    request,
+                    flags and android.view.inputmethod.InputConnection
+                        .GET_EXTRACTED_TEXT_MONITOR.inv()
+                )
+        }
+    }
+
+    /**
+     * What the IME sees when it extracts "the text": a window around the
+     * selection, not the manuscript.
+     *
+     * Both the connection's getExtractedText and the per-edit monitor updates
+     * funnel through this method, and the device's IME re-extracts on every
+     * edit. Handing it the whole buffer made a keystroke cost time linear in
+     * the length of the document — four seconds in a 25k-word part, measured
+     * on the panel — while the hardware-keyboard path, which has no input
+     * connection at all, stayed instant. The IME only ever needs enough
+     * context to compose with; it gets that, positioned absolutely via
+     * [ExtractedText.startOffset] so its edits still land where they should.
+     *
+     * Plain text on purpose: the extract UI is disabled, so styles in the
+     * extract serve nobody, and parcelling a window of spans across the
+     * binder on every keystroke is exactly the bill this method exists to
+     * cancel.
+     */
+    override fun extractText(
+        request: android.view.inputmethod.ExtractedTextRequest,
+        outText: android.view.inputmethod.ExtractedText
+    ): Boolean {
+        val e = text ?: return false
+        val selLo = min(selectionStart, selectionEnd).coerceIn(0, e.length)
+        val selHi = max(selectionStart, selectionEnd).coerceIn(0, e.length)
+        val from = (selLo - EXTRACT_WINDOW).coerceAtLeast(0)
+        val to = (selHi + EXTRACT_WINDOW).coerceAtMost(e.length)
+        outText.text = e.subSequence(from, to).toString()
+        outText.startOffset = from
+        outText.selectionStart = selLo - from
+        outText.selectionEnd = selHi - from
+        outText.partialStartOffset = -1
+        outText.partialEndOffset = -1
+        outText.flags =
+            if (selLo != selHi) android.view.inputmethod.ExtractedText.FLAG_SELECTING else 0
+        return true
     }
 
     private fun imm(): InputMethodManager =
@@ -722,6 +789,46 @@ class MarkdownEditor @JvmOverloads constructor(
         canvas.drawRect(x, top + inset, x + w, bottom - inset, caretPaint)
     }
 
+    /**
+     * Places [offset] the way a reader expects after picking it from a list:
+     * caret in the line, the line one line-height down from the top of the
+     * page, visible. Outline, contents and link jumps come through here;
+     * find keeps its own centring, where the match wants context both ways.
+     *
+     * Placement runs twice. The first scroll is what makes the styled window
+     * rebuild around the target, and the rebuild changes line heights — the
+     * space over a heading, a table's rows — so a single placement measured
+     * against the old heights drifts, and can drift the caret clean off the
+     * screen. The second pass runs after that work has settled and places
+     * the line against the heights that will actually be drawn. Typewriter
+     * mode gets the final word and centres instead, where it holds the caret
+     * anyway.
+     */
+    fun jumpTo(offset: Int) {
+        val e = text ?: return
+        val at = offset.coerceIn(0, e.length)
+        // Focus first: the caret is drawn only in a focused editor, and a
+        // jump whose caret cannot be seen reads as being lost.
+        requestFocus()
+        setSelection(at)
+        placeAtTop(at)
+        post {
+            post {
+                if (::prefs.isInitialized && prefs.typewriterMode) centreCaret()
+                else placeAtTop(at)
+            }
+        }
+    }
+
+    private fun placeAtTop(offset: Int) {
+        val l = layout ?: return
+        val line = l.getLineForOffset(offset.coerceIn(0, l.text.length))
+        val air = l.getLineBottom(line) - l.getLineTop(line)
+        val target = l.getLineTop(line) + totalPaddingTop - air
+        val maxScroll = max(0, l.height + totalPaddingTop + totalPaddingBottom - height)
+        scrollTo(0, target.coerceIn(0, maxScroll))
+    }
+
     fun centreCaret() {
         val l = layout ?: return
         // The layout can lag the buffer for a frame after setText, so the caret
@@ -934,5 +1041,12 @@ class MarkdownEditor @JvmOverloads constructor(
 
         private const val MAX_HISTORY = 300
         private const val COALESCE_MS = 1200L
+
+        /**
+         * How much of the document the IME may see either side of the
+         * selection. Far more context than any composition needs, far less
+         * than a manuscript.
+         */
+        private const val EXTRACT_WINDOW = 1024
     }
 }

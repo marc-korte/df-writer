@@ -18,6 +18,11 @@
         android:hardwareAccelerated="true"
         android:theme="@style/SlateTheme">
 
+        <!-- Lets shell profilers (simpleperf) attach to release builds, which
+             is how the per-keystroke cost was hunted down on the device. No
+             effect on anything a user can reach. -->
+        <profileable android:shell="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

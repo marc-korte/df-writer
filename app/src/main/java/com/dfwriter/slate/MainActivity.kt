@@ -859,10 +859,7 @@ class MainActivity : Activity() {
         sheet.configure("Outline", "Jump to a heading…", items)
         sheet.onPick = { item ->
             closeSheets()
-            (item.payload as? Int)?.let { off ->
-                editor.setSelection(off.coerceIn(0, editor.text.length))
-                editor.post { editor.centreCaret() }
-            }
+            (item.payload as? Int)?.let { goTo(it) }
         }
         sheet.onFreeText = null
         sheet.show()
@@ -945,8 +942,7 @@ class MainActivity : Activity() {
     private class Jump(val file: File, val offset: Int)
 
     private fun goTo(offset: Int) {
-        editor.setSelection(offset.coerceIn(0, editor.text.length))
-        editor.post { editor.centreCaret() }
+        editor.jumpTo(offset)
     }
 
     private fun showSettings() {
@@ -1261,14 +1257,19 @@ class MainActivity : Activity() {
         // Ctrl with an arrow key say, still repeats in the editor.
         val held = ev.repeatCount != 0
 
-        if (!ev.isCtrlPressed) {
-            if (code == KeyEvent.KEYCODE_ESCAPE || code == KeyEvent.KEYCODE_BACK) {
-                if (sheetsOpen()) { closeSheets(); return true }
-                if (findBar.visibility == View.VISIBLE) {
-                    findBar.hide(); editor.requestFocus(); return true
-                }
-                return false
+        // Before the modifier split: the chord that opened a panel often still
+        // has its modifier on the way up when Esc arrives, and a Bluetooth
+        // keyboard can leave a meta bit stuck besides. Neither may lock a
+        // panel open — Esc means Esc, whatever else is held.
+        if (code == KeyEvent.KEYCODE_ESCAPE || code == KeyEvent.KEYCODE_BACK) {
+            if (sheetsOpen()) { closeSheets(); return true }
+            if (findBar.visibility == View.VISIBLE) {
+                findBar.hide(); editor.requestFocus(); return true
             }
+            return false
+        }
+
+        if (!ev.isCtrlPressed) {
             // Leave every other bare key to whichever view has focus.
             if (sheetsOpen()) return false
             return when (code) {
@@ -1727,8 +1728,7 @@ class MainActivity : Activity() {
             flash("No heading called “$anchor”")
             return
         }
-        editor.setSelection(heading.offset.coerceIn(0, editor.text.length))
-        editor.post { editor.centreCaret() }
+        goTo(heading.offset)
     }
 
     private fun openWithSave(f: File) {

@@ -298,6 +298,81 @@ class ShortcutTest {
         assertTrue("the export should be real HTML", out.readText().contains("<h1>"))
     }
 
+    // ------------------------------------------------- outline jump, escape
+
+    private fun book(words: Int): String {
+        val sb = StringBuilder("# A Book\n\n")
+        val sentence = "The morning began badly and it went on from there, as mornings will. "
+        var w = 0
+        var ch = 1
+        while (w < words) {
+            sb.append("## Chapter ").append(ch).append("\n\n")
+            repeat(10) { sb.append(sentence.repeat(6)).append("\n\n"); w += 78 }
+            ch++
+        }
+        return sb.toString()
+    }
+
+    private fun clickRow(label: String) {
+        val row = findView(activity.window.decorView) { v ->
+            v is TextView && v.isShown && v.text.toString() == label
+        }
+        assertTrue("no visible row labelled \"$label\"", row != null)
+        var t: View = row!!
+        while (!t.isClickable && t.parent is View) t = t.parent as View
+        t.performClick()
+        idle()
+    }
+
+    @Test
+    fun `escape closes the outline`() {
+        setDoc(book(2_000), 0)
+        chord(KeyEvent.KEYCODE_O, shift = true)
+        assertTrue("Ctrl+Shift+O should open the outline", visiblePanel() is ListSheet)
+        plainKey(KeyEvent.KEYCODE_ESCAPE)
+        assertTrue("Escape should close the outline", visiblePanel() == null)
+    }
+
+    @Test
+    fun `escape with ctrl still held closes the outline too`() {
+        setDoc(book(2_000), 0)
+        chord(KeyEvent.KEYCODE_O, shift = true)
+        assertTrue(visiblePanel() is ListSheet)
+        // The chord's modifier is often still on its way up when Esc arrives,
+        // and a Bluetooth keyboard can leave a meta bit stuck besides. Neither
+        // may lock the panel open.
+        chord(KeyEvent.KEYCODE_ESCAPE)
+        assertTrue("Escape must close the panel with Ctrl still down", visiblePanel() == null)
+    }
+
+    @Test
+    fun `a heading picked from the outline lands at the top of the page`() {
+        setDoc(book(20_000), 0)
+        settle()
+        chord(KeyEvent.KEYCODE_O, shift = true)
+        assertTrue(visiblePanel() is ListSheet)
+        clickRow("Chapter 20")
+        settle()   // the placement runs again after the styled window settles
+
+        val at = body().indexOf("## Chapter 20")
+        assertEquals("the caret should sit at the heading", at, editor.selectionStart)
+        assertTrue(
+            "the editor must hold focus again, or the caret is invisible",
+            editor.isFocused
+        )
+        val l = editor.layout!!
+        val line = l.getLineForOffset(at)
+        val screenY = l.getLineTop(line) + editor.totalPaddingTop - editor.scrollY
+        // One line height of air above the heading, measured against settled
+        // heights — not wherever the styled-window rebuild happened to drag it.
+        val lineH = l.getLineBottom(line) - l.getLineTop(line)
+        assertTrue(
+            "a picked heading belongs one line height from the top, " +
+                    "was y=$screenY with line height $lineH of ${editor.height}",
+            kotlin.math.abs(screenY - lineH) <= 2
+        )
+    }
+
     // --------------------------------------------------------------- panels
 
     @Test
