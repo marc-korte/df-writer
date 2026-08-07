@@ -831,10 +831,10 @@ class MarkdownEditor @JvmOverloads constructor(
             scrollX + Scale.mm(1.2f), bottom - (bottom - top) * 0.25f,
             caretPaint
         )
-        // Two points — visible without being a fence post. The first visible
-        // build wore three and Marc called it too thick; a hairline was the
-        // other failure. Thicker still for a few seconds after a jump.
-        val pt = if (System.currentTimeMillis() < caretBoostUntil) 3.5f else 2f
+        // A point and a half — settled by eye on the panel: three read as a
+        // fence post, two still a shade heavy, and the original hairline was
+        // invisible. Thicker for a few seconds after a jump.
+        val pt = if (System.currentTimeMillis() < caretBoostUntil) 3f else 1.5f
         val w = max(3f, Scale.pt(pt))
         val inset = (bottom - top) * 0.10f
         canvas.drawRect(x, top + inset, x + w, bottom - inset, caretPaint)
