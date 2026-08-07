@@ -116,12 +116,6 @@ class MarkdownStyler(private val prefs: Prefs) {
 
     fun clearAll(text: Spannable) = clearSlateSpans(text, 0, text.length)
 
-    /** Drops this styler's spans over a range, leaving the text itself alone. */
-    fun clearRange(text: Spannable, from: Int, to: Int) {
-        val len = text.length
-        clearSlateSpans(text, from.coerceIn(0, len), to.coerceIn(0, len))
-    }
-
     // ---------------------------------------------------------------- lines
 
     /** Styles one line; returns the fenced-code state for the following line. */
@@ -640,8 +634,11 @@ class MarkdownStyler(private val prefs: Prefs) {
          * question — one for the line being styled and another for the state it
          * inherits — made a document render differently depending on where it
          * was edited, and a fence such as ```{r} flip everything after it.
+         *
+         * Internal because [Manuscript] must agree with the renderer about
+         * where a fence is, or a division could cut inside one.
          */
-        private fun isFenceLine(text: CharSequence, start: Int, end: Int): Boolean {
+        internal fun isFenceLine(text: CharSequence, start: Int, end: Int): Boolean {
             var i = start
             var lead = 0
             while (i < end && text[i] == ' ' && lead < 4) { i++; lead++ }

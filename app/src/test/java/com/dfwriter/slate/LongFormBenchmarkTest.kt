@@ -290,6 +290,43 @@ class LongFormBenchmarkTest {
     }
 
     /**
+     * A fling can outrun the styled window's margin, so the widening that
+     * follows overlaps the viewport instead of trailing it. The spans it adds
+     * there include ones DynamicLayout will not reflow for on its own, so the
+     * extension must ask for a layout pass — without one, stale line heights
+     * draw one line over another on the very page being read.
+     */
+    @Test
+    fun `an extension that reaches the page asks for layout`() {
+        val (editor, _) = activityEditor(40_000)
+        val (s0, e0) = editor.styledWindow()
+        assertTrue("this test needs a bounded window to extend", e0 < editor.text.length)
+        // Settle whatever layout work start-up left behind, so the pass this
+        // test counts can only be the scroll's own.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        // isLayoutRequested cannot be asserted here: the same idle that runs
+        // the deferred widening also runs the traversal that clears it. A
+        // global-layout listener only fires when a layout pass actually runs.
+        var layoutPasses = 0
+        editor.viewTreeObserver.addOnGlobalLayoutListener { layoutPasses++ }
+
+        // Land the end of the styled window mid-screen, as a fling would.
+        val l = editor.layout!!
+        val y = l.getLineTop(l.getLineForOffset(e0)) - editor.height / 2
+        editor.scrollTo(0, y.coerceAtLeast(0))
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        val (s1, e1) = editor.styledWindow()
+        assertTrue("the window should have extended downward, $e0 -> $e1", e1 > e0)
+        assertTrue("and not been rebuilt, which would prove nothing: $s0 -> $s1", s1 <= s0)
+        assertTrue(
+            "an extension overlapping the page must cause a layout pass",
+            layoutPasses > 0
+        )
+    }
+
+    /**
      * The editor's own cost, which is the one the writer feels: opening a
      * document, and toggling a mode. Both go through restyleNow, which styles a
      * window around the page rather than the whole buffer.

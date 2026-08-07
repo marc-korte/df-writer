@@ -102,4 +102,43 @@ class ExporterTest {
         val page = html("[odd](sub/a:b.md)\n")
         assertTrue(page, page.contains("<a href=\"sub/a:b.md\">odd</a>"))
     }
+
+    // ---------------------------------------------------------------- images
+
+    private fun tempDir() =
+        java.nio.file.Files.createTempDirectory("exporter").toFile().apply { deleteOnExit() }
+
+    @Test
+    fun `a local image is folded into the page`() {
+        val dir = tempDir()
+        // The bytes need not decode; embedding reads them, it does not render.
+        java.io.File(dir, "pic.png").writeBytes(byteArrayOf(1, 2, 3))
+        val page = Exporter.toHtml("![a photo](pic.png)\n", "Doc", dir)
+        assertTrue(
+            "a local image must not leave the page pointing at a file it " +
+                    "cannot reach: $page",
+            page.contains("src=\"data:image/png;base64,AQID\"")
+        )
+        assertTrue(page, page.contains("alt=\"a photo\""))
+    }
+
+    @Test
+    fun `a missing image keeps its plain path`() {
+        val page = Exporter.toHtml("![a](gone.png)\n", "Doc", tempDir())
+        assertTrue("the src should still say what was meant: $page",
+            page.contains("src=\"gone.png\""))
+    }
+
+    @Test
+    fun `a remote image is left as its address`() {
+        val dir = tempDir()
+        val page = Exporter.toHtml("![a](https://example.com/pic.png)\n", "Doc", dir)
+        assertTrue(page, page.contains("src=\"https://example.com/pic.png\""))
+    }
+
+    @Test
+    fun `with no folder to resolve against nothing changes`() {
+        val page = html("![a](pic.png)\n")
+        assertTrue(page, page.contains("src=\"pic.png\""))
+    }
 }

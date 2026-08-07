@@ -94,6 +94,15 @@ class Prefs(ctx: Context) {
         get() = sp.getInt("autoRefreshEdits", 400)
         set(v) = sp.edit().putInt("autoRefreshEdits", v).apply()
 
+    /**
+     * Words a document may reach before it divides itself into parts. 0 turns
+     * division off entirely — for a library that is synced or versioned
+     * somewhere that expects one file to stay one file.
+     */
+    var autoDivideWords: Int
+        get() = sp.getInt("autoDivideWords", Manuscript.TARGET_WORDS)
+        set(v) = sp.edit().putInt("autoDivideWords", v).apply()
+
     var libraryPath: String
         get() = sp.getString("libraryPath", "")!!
         set(v) = sp.edit().putString("libraryPath", v).apply()
@@ -105,4 +114,36 @@ class Prefs(ctx: Context) {
     var lastCaret: Int
         get() = sp.getInt("lastCaret", 0)
         set(v) = sp.edit().putInt("lastCaret", v).apply()
+
+    // -------------------------------------------------- caret, per document
+
+    /**
+     * Where the caret last was in each recently open document, so switching
+     * between the parts of a book — or any two files — comes back to the
+     * sentence being worked on rather than the top of the page.
+     *
+     * One string pref of newline-separated entries, oldest first, each
+     * "path NUL offset" — NUL because it can appear in no path. Bounded:
+     * past [CARET_MEMORY] files the oldest entry falls out, so the pref
+     * cannot grow with the library.
+     */
+    fun caretFor(path: String): Int =
+        if (path.isEmpty()) 0
+        else sp.getString("caretMemory", "")!!.lineSequence()
+            .lastOrNull { it.substringBeforeLast('\u0000') == path }
+            ?.substringAfterLast('\u0000')?.toIntOrNull() ?: 0
+
+    fun rememberCaret(path: String, caret: Int) {
+        if (path.isEmpty()) return
+        val kept = sp.getString("caretMemory", "")!!.lineSequence()
+            .filter { it.isNotEmpty() && it.substringBeforeLast('\u0000') != path }
+            .toMutableList()
+        kept.add(path + '\u0000' + caret.coerceAtLeast(0))
+        while (kept.size > CARET_MEMORY) kept.removeAt(0)
+        sp.edit().putString("caretMemory", kept.joinToString("\n")).apply()
+    }
+
+    private companion object {
+        const val CARET_MEMORY = 200
+    }
 }

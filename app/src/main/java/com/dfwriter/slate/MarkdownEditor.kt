@@ -585,6 +585,7 @@ class MarkdownEditor @JvmOverloads constructor(
 
         val jumped = !fresh && (to < winStart || from > winEnd)
         val rebuilt = fresh || jumped
+        var extendedOnScreen = false
         styling = true
         try {
             if (rebuilt) {
@@ -598,8 +599,14 @@ class MarkdownEditor @JvmOverloads constructor(
                 if (from < winStart) {
                     styler.restyleRange(e, from, winStart, selectionStart)
                     winStart = from
+                    extendedOnScreen = true
                 }
                 if (to > winEnd) {
+                    // Normally this range lies wholly below the page, but a
+                    // fling can outrun the margin and leave part of it on
+                    // screen — those lines then need the same layout pass an
+                    // upward extension gets, for the same reason.
+                    if (visible != null && winEnd < visible.second) extendedOnScreen = true
                     styler.restyleRange(e, winEnd, to, selectionStart)
                     winEnd = to
                 }
@@ -608,11 +615,14 @@ class MarkdownEditor @JvmOverloads constructor(
         } finally {
             styling = false
         }
-        // A rebuilt window has to be measured again; an extension does not.
-        // Extending only adds spans below what is on screen, and asking for a
-        // layout pass there re-measures every line in the document — which on a
-        // manuscript costs far more than the styling it was meant to settle.
-        if (rebuilt) requestLayout()
+        // A rebuilt window has to be measured again; an extension wholly below
+        // the page does not — asking for a layout pass there re-measures every
+        // line in the document, which on a manuscript costs far more than the
+        // styling it was meant to settle. One that touches lines on or above
+        // the page does: it adds height-changing spans — the space over a
+        // heading is a LineHeightSpan, which DynamicLayout does not reflow for
+        // on its own — and stale heights there draw one line over another.
+        if (rebuilt || extendedOnScreen) requestLayout()
         invalidate()
     }
 

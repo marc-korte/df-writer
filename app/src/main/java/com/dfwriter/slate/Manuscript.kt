@@ -96,36 +96,44 @@ object Manuscript {
         var blockStart = 0
         val len = source.length
         var sawText = false
+        var inFence = false
 
         while (i < len) {
             var lineEnd = i
             while (lineEnd < len && source[lineEnd] != '\n') lineEnd++
             val line = source.substring(i, lineEnd)
-            val heading = HEADING.find(line)
+            // Same fence rules as the renderer, or a cut could fall where the
+            // renderer sees code. Inside a fence nothing is a heading and a
+            // blank line is code, not a boundary: a part boundary there would
+            // split the fence across two files and leave both halves — and
+            // everything after them — rendering wrong.
+            val fenceLine = MarkdownStyler.isFenceLine(source, i, lineEnd)
+            val heading = if (inFence || fenceLine) null else HEADING.find(line)
 
             // A heading always opens a block; a blank line closes one.
             if (heading != null && sawText && i > blockStart) {
-                out.add(Block(source.substring(blockStart, i), headingOf(out, source, blockStart)))
+                out.add(Block(source.substring(blockStart, i), headingOf(source, blockStart)))
                 blockStart = i
                 sawText = false
             }
+            if (fenceLine) inFence = !inFence
             if (line.isNotBlank()) sawText = true
             i = if (lineEnd < len) lineEnd + 1 else len
 
-            if (line.isBlank() && sawText && i < len) {
-                out.add(Block(source.substring(blockStart, i), headingOf(out, source, blockStart)))
+            if (!inFence && line.isBlank() && sawText && i < len) {
+                out.add(Block(source.substring(blockStart, i), headingOf(source, blockStart)))
                 blockStart = i
                 sawText = false
             }
         }
         if (blockStart < len) {
-            out.add(Block(source.substring(blockStart, len), headingOf(out, source, blockStart)))
+            out.add(Block(source.substring(blockStart, len), headingOf(source, blockStart)))
         }
         return out
     }
 
     /** The heading a block opens with, if it opens with one. */
-    private fun headingOf(out: List<Block>, source: String, start: Int): String? {
+    private fun headingOf(source: String, start: Int): String? {
         var i = start
         while (i < source.length) {
             var e = i

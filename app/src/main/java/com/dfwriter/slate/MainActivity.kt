@@ -46,7 +46,6 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private var browseDir: File? = null
     private var editsSinceRefresh = 0
-    private var lastFindIndex = -1
     private var statusMessage: String? = null
     private var chromeStale = false
     private var chromeUi = 1f
@@ -152,6 +151,7 @@ class MainActivity : Activity() {
         // very draft being offered.
         if (!recoveryPending) store.writeScratch(editor.text.toString())
         prefs.lastCaret = editor.selectionStart
+        store.current?.let { prefs.rememberCaret(it.absolutePath, editor.selectionStart) }
     }
 
     override fun onDestroy() {
@@ -399,7 +399,15 @@ class MainActivity : Activity() {
             val f = File(last)
             if (f.isFile && f.canRead()) {
                 loadInto(f)
-                editor.setSelection(prefs.lastCaret.coerceIn(0, editor.text.length))
+                // Migration only: sessions from before the per-document memory
+                // left their place in this single slot alone. Once loadInto has
+                // a remembered caret it wins — it is per-document, where this
+                // slot belongs to whichever file was open at the last pause,
+                // which after a crash mid-switch is not this one.
+                if (prefs.caretFor(f.absolutePath) == 0 && prefs.lastCaret > 0) {
+                    editor.setSelection(prefs.lastCaret.coerceIn(0, editor.text.length))
+                    editor.post { editor.centreCaret() }
+                }
                 return
             }
         }
@@ -440,10 +448,14 @@ class MainActivity : Activity() {
         // Until this is answered the shadow copy is the only place the draft
         // exists, so nothing may write over it. Dismissing the prompt without
         // choosing leaves it alone too, and the offer comes back next start.
+        // preserveScratch guards the save paths, which refresh the shadow copy
+        // as part of every successful write; recoveryPending guards the rest.
         recoveryPending = true
+        store.preserveScratch = true
         sheet.onPick = { item ->
             closeSheets()
             recoveryPending = false
+            store.preserveScratch = false
             if (item.payload == RECOVER_RESTORE) {
                 editor.setText(recovered)
                 editor.restyleNow()
@@ -504,7 +516,44 @@ class MainActivity : Activity() {
         return f
     }
 
+    /**
+     * The recovery offer belongs to the document it was made for. Switching to
+     * another one ends its reach — the prompt is gone, and the next start will
+     * open the other file, so the offer can never come back — and the shadow
+     * slot has to be freed, or the new document spends the whole session with
+     * no crash protection at all. The draft is not discarded to make room: it
+     * becomes an ordinary file beside the others, where it can be read and
+     * merged or deleted. Text kept twice can be seen; text dropped cannot.
+     */
+    private fun parkRecoveryDraft(target: File?) {
+        if (!recoveryPending) return
+        // Reopening the very document the offer belongs to changes nothing.
+        if (target != null && target.absolutePath == store.current?.absolutePath) return
+        val draft = store.readScratch()
+        if (draft.isNullOrBlank()) {
+            recoveryPending = false
+            store.preserveScratch = false
+            store.clearScratch()
+            return
+        }
+        val stem = store.scratchOwner()?.let { File(it).nameWithoutExtension } ?: "untitled"
+        val kept = store.newFile(store.libraryRoot(), "$stem recovered")
+        // preserveScratch still stands here, so this write cannot touch the
+        // slot it is rescuing. Only a parked draft releases the slot; a card
+        // that refuses the write leaves everything as it was, still preserved.
+        if (!store.writeThrough(kept, draft)) return
+        recoveryPending = false
+        store.preserveScratch = false
+        store.clearScratch()
+        flash("Recovered text kept as ${kept.name}")
+    }
+
     private fun loadInto(f: File) {
+        parkRecoveryDraft(f)
+        // The document being left keeps its place, so coming back to it — the
+        // next chapter over, or tomorrow — lands on the sentence being worked
+        // on rather than the top of the page.
+        store.current?.let { prefs.rememberCaret(it.absolutePath, editor.selectionStart) }
         val body = runCatching { store.open(f) }.getOrElse {
             flash("Could not read ${f.name}")
             return
@@ -517,9 +566,12 @@ class MainActivity : Activity() {
         editor.restyleNow()
         // Focus first, then place the caret. Taking focus moves the caret to
         // the end of the buffer on the device — Robolectric stubs focus, so a
-        // test will not show it — and a document should open at its beginning.
+        // test will not show it. A document opens where the caret last was in
+        // it, which is its beginning if it has never been open here.
         editor.requestFocus()
-        editor.setSelection(0)
+        val caret = prefs.caretFor(f.absolutePath).coerceIn(0, editor.text.length)
+        editor.setSelection(caret)
+        if (caret > 0) editor.post { editor.centreCaret() }
         editor.clearHistory()
         editsSinceRefresh = 0
         // setText runs the change listener, which flags the document dirty even
@@ -534,6 +586,8 @@ class MainActivity : Activity() {
     }
 
     private fun newDocument() {
+        parkRecoveryDraft(null)
+        store.current?.let { prefs.rememberCaret(it.absolutePath, editor.selectionStart) }
         val f = store.createAndOpen(store.libraryRoot())
         editor.setText("")
         editor.restyleNow()
@@ -630,11 +684,13 @@ class MainActivity : Activity() {
      */
     private fun divideIfTooLong() {
         if (dividing) return
+        val limit = prefs.autoDivideWords
+        if (limit <= 0) return
         val f = store.current ?: return
-        if (cachedWords <= Manuscript.TARGET_WORDS) return
+        if (cachedWords <= limit) return
 
         val body = editor.text.toString()
-        val plan = Manuscript.plan(body) ?: return
+        val plan = Manuscript.plan(body, limit) ?: return
 
         dividing = true
         try {
@@ -981,6 +1037,12 @@ class MainActivity : Activity() {
             "clears E Ink ghosting"
         ),
         SettingsSheet.Row(
+            "Auto-divide",
+            { if (prefs.autoDivideWords <= 0) "off" else "${prefs.autoDivideWords / 1000}k words" },
+            { d -> prefs.autoDivideWords = (prefs.autoDivideWords + d * 5_000).coerceIn(0, 100_000) },
+            "split a long piece into parts"
+        ),
+        SettingsSheet.Row(
             "Panel",
             { Scale.describe() },
             { },
@@ -1098,7 +1160,11 @@ class MainActivity : Activity() {
         Cmd("Refresh screen", "Ctrl R") { flashRefresh() },
         Cmd("Word count", "Ctrl W") {
             val w = DocStore.countWords(editor.text)
-            flash("$w words · ${editor.text.length} characters · ${readingTime(w)}")
+            // The status bar shows the whole book; a flash that showed only
+            // the open part with no label would look like a different answer
+            // to the same question.
+            val book = if (othersWords > 0) " · ${w + othersWords} in the book" else ""
+            flash("$w words · ${editor.text.length} characters · ${readingTime(w)}$book")
         },
         Cmd("Export to HTML", "Ctrl Shift M") { exportHtml() },
         Cmd("Export to PDF", "Ctrl Shift P") { exportPdf() }
@@ -1215,7 +1281,9 @@ class MainActivity : Activity() {
             KeyEvent.KEYCODE_E -> "Inline code"
             KeyEvent.KEYCODE_D -> if (shift) "Strikethrough" else null
             KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER ->
-                "Open the link under the caret"
+                // A sheet claims Ctrl+Enter for "make the file I typed", and a
+                // chord swallowed here would never reach it.
+                if (sheetsOpen()) null else "Open the link under the caret"
             KeyEvent.KEYCODE_K -> if (shift) "Code block" else "Link"
             KeyEvent.KEYCODE_L -> if (shift) "Bullet list" else null
             KeyEvent.KEYCODE_T -> if (shift) "Task list" else "Table of contents"
@@ -1292,7 +1360,6 @@ class MainActivity : Activity() {
             findBar.setStatus("")
         }
         if (idx < 0) return
-        lastFindIndex = idx
         editor.setSelection(idx, idx + q.length)
         editor.post { editor.centreCaret() }
     }
@@ -1341,31 +1408,60 @@ class MainActivity : Activity() {
      * screen. A save that fails is the end of it — exporting anyway would write
      * out an old draft under a name that says otherwise.
      */
-    private fun exportSource(): Pair<String, String>? {
+    private fun exportSource(): Pair<() -> String, String>? {
         val f = store.current
         val folder = f?.let { Manuscript.folderOf(it) }
-            ?: return editor.text.toString() to (f?.nameWithoutExtension ?: "document")
+        if (folder == null) {
+            // The buffer is snapshotted here, on the main thread it belongs
+            // to; the closure hands the copy to whichever thread exports it.
+            val body = editor.text.toString()
+            return Pair({ body }, f?.nameWithoutExtension ?: "document")
+        }
         if (store.dirty && !saveQuietly()) {
             flash("Not exported — the book could not be saved first")
             return null
         }
-        return Manuscript.compile(folder) to folder.name
+        // Compiled later, on the save thread: reading a whole book back off
+        // the card is not main-thread work. The parts are stable by then —
+        // the open one was just saved above, and the export task queues
+        // behind any save still in flight on the same thread.
+        return Pair({ Manuscript.compile(folder) }, folder.name)
     }
 
     private fun exportHtml() {
-        val (body, name) = exportSource() ?: return
+        // A second run would be writing into the same file as the first.
+        if (exporting) { flash("Still building the last export…"); return }
+        val (bodyOf, name) = exportSource() ?: return
         val out = File(exportDir(), "$name.html")
-        runCatching {
-            out.parentFile?.mkdirs()
-            out.writeText(Exporter.toHtml(body, name), Charsets.UTF_8)
-        }.onSuccess { flash("HTML → ${out.absolutePath}") }
-            .onFailure { flash("Export failed: ${it.message}") }
+        // Pictures are folded into the page, resolved against the part they
+        // sit in, which is inside the manuscript folder rather than beside it.
+        val dir = store.current?.parentFile
+        flash("Building HTML…")
+        exporting = true
+        // Rendering and fsync-writing a whole book is main-thread poison the
+        // same way the PDF is. The save thread rather than one of its own, so
+        // an export and a save take their turn on the card — and so a test
+        // can wait for it the way it waits for a save.
+        saveIo.execute {
+            val result = runCatching {
+                out.parentFile?.mkdirs()
+                out.writeText(Exporter.toHtml(bodyOf(), name, dir), Charsets.UTF_8)
+            }
+            ui.post {
+                exporting = false
+                // The thread outlives the activity, and a message posted from it
+                // after onDestroy is one that onDestroy could not have cancelled.
+                if (isDestroyed || isFinishing) return@post
+                result.onSuccess { flash("HTML → ${out.absolutePath}") }
+                    .onFailure { flash("Export failed: ${it.message}") }
+            }
+        }
     }
 
     private fun exportPdf() {
         // A second run would be drawing into the same file as the first.
-        if (exporting) { flash("Still building the last PDF…"); return }
-        val (body, name) = exportSource() ?: return
+        if (exporting) { flash("Still building the last export…"); return }
+        val (bodyOf, name) = exportSource() ?: return
         val out = File(exportDir(), "$name.pdf")
         // Pictures are named relative to the part they sit in, which is inside
         // the manuscript folder rather than beside it.
@@ -1374,17 +1470,24 @@ class MainActivity : Activity() {
         exporting = true
         // Laying out and drawing every page is far too slow for the main thread
         // on an RK3566; a long document would trip the ANR watchdog.
-        Thread {
-            val result = runCatching { Exporter.toPdf(body, prefs, out, name, dir) }
+        saveIo.execute {
+            var truncated = false
+            val result = runCatching {
+                Exporter.toPdf(bodyOf(), prefs, out, name, dir) { truncated = true }
+            }
             ui.post {
                 exporting = false
                 // The thread outlives the activity, and a message posted from it
                 // after onDestroy is one that onDestroy could not have cancelled.
                 if (isDestroyed || isFinishing) return@post
-                result.onSuccess { flash("PDF → ${out.absolutePath}") }
-                    .onFailure { flash("Export failed: ${it.message}") }
+                result.onSuccess {
+                    flash(
+                        if (truncated) "PDF → ${out.absolutePath} — stopped at 2000 pages"
+                        else "PDF → ${out.absolutePath}"
+                    )
+                }.onFailure { flash("Export failed: ${it.message}") }
             }
-        }.start()
+        }
     }
 
     private fun exportDir(): File {
@@ -1593,7 +1696,10 @@ class MainActivity : Activity() {
 
     /** GitHub-style anchor: "my heading" matches "## My Heading". */
     private fun jumpToHeading(anchor: String) {
-        val want = anchor.trim().lowercase().replace(' ', '-')
+        // Normalised exactly as the heading side is, or an anchor that carries
+        // the heading's own punctuation could never match it.
+        val want = anchor.trim().lowercase().replace(Regex("[^a-z0-9 -]"), "").trim()
+            .replace(' ', '-')
         val heading = MarkdownStyler.outline(editor.text).firstOrNull {
             it.title.lowercase().replace(Regex("[^a-z0-9 -]"), "").trim()
                 .replace(' ', '-') == want

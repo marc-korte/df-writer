@@ -17,8 +17,12 @@ object Exporter {
     private const val PAGE_H = 842
     private const val MARGIN = 64
 
+    /** A runaway layout stops here rather than filling the card. */
+    private const val PAGE_CAP = 2000
+
     fun toPdf(
-        source: String, prefs: Prefs, out: File, title: String, documentDir: File? = null
+        source: String, prefs: Prefs, out: File, title: String, documentDir: File? = null,
+        onTruncated: (() -> Unit)? = null
     ): File {
         val width = PAGE_W - MARGIN * 2
         // Pictures are resolved against the document's own folder, as they are in
@@ -95,7 +99,13 @@ object Exporter {
 
             line = last + 1
             page++
-            if (page > 2000) break
+            if (page > PAGE_CAP) {
+                // Say so rather than hand over a file that silently ends early
+                // — but only when something was actually cut: a book that ends
+                // exactly at the cap was not truncated.
+                if (line < layout.lineCount) onTruncated?.invoke()
+                break
+            }
         }
 
         try {
@@ -110,13 +120,19 @@ object Exporter {
 
     // ----------------------------------------------------------------- html
 
-    fun toHtml(source: String, title: String): String = buildString {
+    /**
+     * [imageDir] is the folder image paths resolve against — the document's
+     * own. With it, local pictures are folded into the page itself, which is
+     * what lets the file claim to be self-contained: the export lands in a
+     * different folder from the images, and mail strips folders anyway.
+     */
+    fun toHtml(source: String, title: String, imageDir: File? = null): String = buildString {
         append("<!doctype html>\n<html><head><meta charset=\"utf-8\">\n")
         append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n")
         append("<title>").append(esc(title)).append("</title>\n<style>\n")
         append(CSS)
         append("</style></head>\n<body>\n")
-        append(Md.render(source))
+        append(Md.render(source, imageDir))
         append("\n</body></html>\n")
     }
 
@@ -155,7 +171,7 @@ object Exporter {
 /** A small, dependency-free Markdown to HTML renderer. */
 object Md {
 
-    fun render(src: String): String {
+    fun render(src: String, imageDir: java.io.File? = null): String {
         val out = StringBuilder()
         val lines = src.replace("\r\n", "\n").split("\n")
         var i = 0
@@ -200,12 +216,12 @@ object Md {
             ) {
                 closeLists()
                 out.append("<table>\n<thead><tr>")
-                for (c in cells(line)) out.append("<th>").append(inline(c)).append("</th>")
+                for (c in cells(line)) out.append("<th>").append(inline(c, imageDir)).append("</th>")
                 out.append("</tr></thead>\n<tbody>\n")
                 i += 2
                 while (i < lines.size && lines[i].contains('|') && lines[i].isNotBlank()) {
                     out.append("<tr>")
-                    for (c in cells(lines[i])) out.append("<td>").append(inline(c)).append("</td>")
+                    for (c in cells(lines[i])) out.append("<td>").append(inline(c, imageDir)).append("</td>")
                     out.append("</tr>\n")
                     i++
                 }
@@ -223,7 +239,7 @@ object Md {
             if (h != null) {
                 closeLists()
                 val lvl = h.groupValues[1].length
-                out.append("<h$lvl>").append(inline(h.groupValues[2].trim()))
+                out.append("<h$lvl>").append(inline(h.groupValues[2].trim(), imageDir))
                     .append("</h$lvl>\n")
                 i++; continue
             }
@@ -236,7 +252,7 @@ object Md {
                     body.append(lines[i].replaceFirst(Regex("^\\s{0,3}>\\s?"), "")).append('\n')
                     i++
                 }
-                out.append("<blockquote>\n").append(render(body.toString()))
+                out.append("<blockquote>\n").append(render(body.toString(), imageDir))
                     .append("</blockquote>\n")
                 continue
             }
@@ -261,10 +277,10 @@ object Md {
                     val done = task.groupValues[1].lowercase() == "x"
                     out.append("<li class=\"task\">")
                         .append(if (done) "☑ " else "☐ ")
-                        .append(inline(task.groupValues[2]))
+                        .append(inline(task.groupValues[2], imageDir))
                         .append("</li>\n")
                 } else {
-                    out.append("<li>").append(inline(body)).append("</li>\n")
+                    out.append("<li>").append(inline(body, imageDir)).append("</li>\n")
                 }
                 i++; continue
             }
@@ -281,7 +297,7 @@ object Md {
                 i++
             }
             if (para.isNotEmpty()) {
-                out.append("<p>").append(inline(para.toString()).replace("\n", "<br>\n"))
+                out.append("<p>").append(inline(para.toString(), imageDir).replace("\n", "<br>\n"))
                     .append("</p>\n")
             }
         }
@@ -330,7 +346,36 @@ object Md {
         return "\u0000${held.size - 1}\u0000"
     }
 
-    private fun inline(sIn: String): String {
+    /**
+     * A local picture is folded into the page as a data URI: the export lands
+     * in Exports/, one folder away from the images, so a relative src would be
+     * broken from the moment it was written. Anything that cannot be read —
+     * or is not recognisably an image — keeps its plain src, which at least
+     * says what was meant. Remote URLs pass through untouched.
+     */
+    private fun embed(src: String, imageDir: java.io.File?): String? {
+        if (imageDir == null) return null
+        // The src has been through escape(); the file on disk has not.
+        val raw = src.replace("&#39;", "'").replace("&quot;", "\"")
+            .replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+        val f = ImageCache.resolve(raw, imageDir) ?: return null
+        if (!f.isFile || !f.canRead() || f.length() > EMBED_CAP) return null
+        val mime = when (f.extension.lowercase()) {
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "bmp" -> "image/bmp"
+            else -> return null
+        }
+        val b64 = java.util.Base64.getEncoder().encodeToString(f.readBytes())
+        return "data:$mime;base64,$b64"
+    }
+
+    /** Past this a single picture would dominate the page's size in memory. */
+    private const val EMBED_CAP = 8L * 1024 * 1024
+
+    private fun inline(sIn: String, imageDir: java.io.File? = null): String {
         // Protect code spans from every other rule, exactly as Markdown requires.
         val codes = ArrayList<String>()
         // The content may itself contain backticks, as in ``a ` b``, so it must
@@ -349,7 +394,8 @@ object Md {
                 // Same rule as a link below: a scheme that could execute is not
                 // written into the page at all, and the alt text stands in.
                 if (safeHref(m.groupValues[2])) {
-                    hold(codes, "<img src=\"${m.groupValues[2]}\" alt=\"${m.groupValues[1]}\">")
+                    val src = embed(m.groupValues[2], imageDir) ?: m.groupValues[2]
+                    hold(codes, "<img src=\"$src\" alt=\"${m.groupValues[1]}\">")
                 } else m.groupValues[1]
             }
         s = Regex("\\[([^\\]]*)]\\(([^)\\s]+)\\)")

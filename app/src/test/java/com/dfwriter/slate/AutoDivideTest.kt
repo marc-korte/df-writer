@@ -218,6 +218,9 @@ class AutoDivideTest {
             )
         )
         shadowOf(Looper.getMainLooper()).idle()
+        // The page is written on the save thread; wait the way a save is waited for.
+        a.drainSaves()
+        shadowOf(Looper.getMainLooper()).idle()
 
         val html = File(File(lib, "Exports"), "novel.html")
         assertTrue("nothing was exported, library holds ${lib.list()?.toList()}", html.isFile)
@@ -269,6 +272,8 @@ class AutoDivideTest {
                 )
             )
             shadowOf(Looper.getMainLooper()).idle()
+            a.drainSaves()
+            shadowOf(Looper.getMainLooper()).idle()
 
             assertFalse(
                 "an export written from stale parts would be missing the newest work",
@@ -288,12 +293,24 @@ class AutoDivideTest {
             )
         )
         shadowOf(Looper.getMainLooper()).idle()
+        a.drainSaves()
+        shadowOf(Looper.getMainLooper()).idle()
         val html = File(File(lib, "Exports"), "novel.html")
         assertTrue("the export should go through once the save can", html.isFile)
         assertTrue(
             "and it should hold the line that could not be saved before",
             html.readText().contains("A line the card will never hold")
         )
+    }
+
+    @Test
+    fun `switched off, a long document stays one file`() {
+        prefs.autoDivideWords = 0
+        val a = start()
+        tick()
+        assertTrue("division is off; the file must be left alone", doc.isFile)
+        assertFalse(File(lib, "novel").isDirectory)
+        editorOf(a)
     }
 
     @Test

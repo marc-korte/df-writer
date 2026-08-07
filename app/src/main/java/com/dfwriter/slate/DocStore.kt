@@ -21,6 +21,19 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
     var dirty: Boolean = false
 
     /**
+     * True while a recovery offer is on screen and unanswered. Every save path
+     * — autosave, explicit save, pause — refreshes the shadow copy through
+     * [writeScratchFor], and while the offer stands that copy is the only
+     * place the draft exists, so refreshing it would destroy the very text
+     * being offered. Set when the prompt goes up, cleared when it is answered;
+     * a prompt merely dismissed leaves it set, and the offer returns next start.
+     *
+     * Volatile: set on the main thread, read by the save thread.
+     */
+    @Volatile
+    var preserveScratch: Boolean = false
+
+    /**
      * Held by everything that writes to the card or to the shadow copy, and by
      * nothing else. What this object *remembers* — [current], [dirty], the
      * preferences — stays main-thread only; only the writing is shared, and
@@ -83,16 +96,20 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
 
     // ------------------------------------------------------------- browsing
 
-    data class Entry(val file: File, val isDir: Boolean, val words: Int)
+    data class Entry(val file: File, val isDir: Boolean)
 
     fun list(dir: File): List<Entry> {
         val kids = dir.listFiles() ?: return emptyList()
         val dirs = kids.filter { it.isDirectory && !it.name.startsWith(".") }
             .sortedBy { it.name.lowercase() }
-            .map { Entry(it, true, 0) }
+            .map { Entry(it, true) }
         val files = kids.filter { it.isFile && isText(it) }
-            .sortedByDescending { it.lastModified() }
-            .map { Entry(it, false, 0) }
+            .let { fs ->
+                // A book's folder reads in order; anywhere else, newest first.
+                if (Manuscript.isManuscript(dir)) fs.sortedBy { it.name.lowercase() }
+                else fs.sortedByDescending { it.lastModified() }
+            }
+            .map { Entry(it, false) }
         return dirs + files
     }
 
@@ -228,14 +245,6 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
         }
     }
 
-    fun saveAs(f: File, body: String): File? {
-        synchronized(ioLock) {
-            current = f
-            identityChanged()
-        }
-        return save(body)
-    }
-
     fun newFile(dir: File, title: String? = null): File {
         dir.mkdirs()
         val base = (title?.takeIf { it.isNotBlank() }?.let(::slug))
@@ -341,6 +350,9 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
         // Serialised against every other writer here, so that the half-written
         // window below cannot be widened by a second writer stepping into it.
         synchronized(ioLock) {
+            // Checked under the same lock the write holds, so the answer
+            // cannot change between the check and the write it guards.
+            if (preserveScratch) return
             runCatching {
                 // Body and owner cannot be written in one step, so the pair is
                 // disowned first. Dying between the writes then reads back as

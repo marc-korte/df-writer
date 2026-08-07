@@ -112,6 +112,49 @@ class ManuscriptTest {
         )
     }
 
+    /**
+     * Chapters that carry fenced code. A `#` comment and a blank line inside a
+     * fence look exactly like a heading and a paragraph break to a divider
+     * that does not track fences, and the sizes are arranged so the naive cut
+     * would fall right there.
+     */
+    private fun bookWithCode(words: Int): String {
+        val sb = StringBuilder("# A Technical Book\n\nAn opening note.\n\n")
+        var w = 0
+        var ch = 1
+        while (w < words) {
+            sb.append("## Chapter ").append(ch).append("\n\n")
+            repeat(12) { sb.append(sentence.repeat(8)).append("\n\n"); w += 96 }
+            sb.append("```python\n\n# a comment inside code\n\nvalue = ")
+                .append(ch).append("\n\n```\n\n")
+            w += 6
+            ch++
+        }
+        return sb.toString()
+    }
+
+    @Test
+    fun `a fenced code block is never cut and its comments are never headings`() {
+        val source = bookWithCode(60_000)
+        val plan = Manuscript.plan(source, targetWords = 25_000)
+        assertNotNull("a book with code in it should still divide", plan)
+        assertEquals("dividing must stay lossless", source, Manuscript.join(plan!!))
+        for ((i, part) in plan.parts.withIndex()) {
+            val fences = part.body.lineSequence().count { it.trimStart().startsWith("```") }
+            assertEquals("part ${i + 1} was cut inside a code fence", 0, fences % 2)
+            assertFalse(
+                "a code comment became the title of part ${i + 1}: ${part.title}",
+                part.title.contains("comment")
+            )
+        }
+        for (part in plan.parts.drop(1)) {
+            assertTrue(
+                "a part must open on a chapter, not inside code: ${part.body.take(40)}",
+                part.body.trimStart().startsWith("## Chapter")
+            )
+        }
+    }
+
     @Test
     fun `a heading with no text under it does not strand an empty part`() {
         val source = book(60_000)

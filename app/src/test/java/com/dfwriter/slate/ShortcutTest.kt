@@ -290,6 +290,9 @@ class ShortcutTest {
     fun `ctrl shift M exports HTML into the library`() {
         setDoc("# Title\n\nbody", 0)
         chord(KeyEvent.KEYCODE_M, shift = true)
+        // The page is written on the save thread; wait the way a save is waited for.
+        activity.drainSaves()
+        shadowOf(Looper.getMainLooper()).idle()
         val out = File(File(lib, "Exports"), "Welcome to Slate.html")
         assertTrue("expected ${out.absolutePath}, saw ${visibleTexts()}", out.isFile)
         assertTrue("the export should be real HTML", out.readText().contains("<h1>"))

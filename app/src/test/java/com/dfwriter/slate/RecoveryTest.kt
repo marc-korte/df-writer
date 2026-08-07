@@ -15,6 +15,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.io.File
+import java.time.Duration
 
 /**
  * Starting up after text failed to reach disk. The shadow copy is only worth
@@ -188,6 +189,84 @@ class RecoveryTest {
 
         assertEquals("the offered draft must survive an unanswered pause", recovered, scratchBody())
         assertEquals(doc.absolutePath, scratchOwner())
+    }
+
+    @Test
+    fun `a save after the prompt is dismissed does not destroy the draft`() {
+        val recovered = "what reached the disk plus the words that did not"
+        leaveScratch(recovered, doc.absolutePath)
+        val a = start()
+        assertTrue(
+            "the prompt must be up for this to mean anything",
+            visibleTexts(a).any { it.contains("recovered", ignoreCase = true) }
+        )
+
+        // Dismiss without choosing — the offer is meant to come back next
+        // start — then keep writing. The autosave that lands the edit also
+        // refreshes the shadow copy on every other day, and this is the one
+        // day it must not.
+        a.dispatchKeyEvent(
+            android.view.KeyEvent(
+                0, 0, android.view.KeyEvent.ACTION_DOWN,
+                android.view.KeyEvent.KEYCODE_ESCAPE, 0
+            )
+        )
+        shadowOf(Looper.getMainLooper()).idle()
+        editorOf(a).text.insert(0, "More words. ")
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(6))
+        a.drainSaves()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertTrue("the file should have taken the edit",
+            doc.readText().startsWith("More words. "))
+        assertEquals(
+            "the offered draft must survive a save made while unanswered",
+            recovered, scratchBody()
+        )
+        assertEquals(doc.absolutePath, scratchOwner())
+    }
+
+    @Test
+    fun `switching documents with the offer unanswered keeps the draft as a file`() {
+        val recovered = "what reached the disk plus the words that did not"
+        leaveScratch(recovered, doc.absolutePath)
+        val a = start()
+        assertTrue(
+            "the prompt must be up for this to mean anything",
+            visibleTexts(a).any { it.contains("recovered", ignoreCase = true) }
+        )
+
+        // Dismiss without choosing, then walk away to a fresh document. The
+        // offer cannot come back — the next start opens the other file — and
+        // the new document needs the shadow slot for itself.
+        a.dispatchKeyEvent(
+            android.view.KeyEvent(
+                0, 0, android.view.KeyEvent.ACTION_DOWN,
+                android.view.KeyEvent.KEYCODE_ESCAPE, 0
+            )
+        )
+        shadowOf(Looper.getMainLooper()).idle()
+        a.dispatchKeyEvent(
+            android.view.KeyEvent(
+                0, 0, android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_N, 0,
+                android.view.KeyEvent.META_CTRL_ON or android.view.KeyEvent.META_CTRL_LEFT_ON
+            )
+        )
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val parked = (lib.listFiles() ?: emptyArray()).filter { it.name.contains("recovered") }
+        assertEquals("the draft must survive as an ordinary file", 1, parked.size)
+        assertEquals(recovered, parked[0].readText())
+
+        // The slot is free again: the new document gets crash protection back.
+        editorOf(a).text.insert(0, "New words. ")
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(6))
+        a.drainSaves()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(
+            "the new document must be shadowed again, saw: ${scratchBody()?.take(40)}",
+            scratchBody()?.startsWith("New words. ") == true
+        )
     }
 
     @Test

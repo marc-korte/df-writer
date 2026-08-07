@@ -84,7 +84,11 @@ your eyes, two keystrokes fix it permanently.
   inside a paragraph; a piece with nowhere safe to cut is left whole. The
   original is kept beside the folder as a `.bak`, so nothing here can lose a
   manuscript. The contents drawer and the word count then span every part, so it
-  still reads as one book.
+  still reads as one book. Every document remembers where its caret was, so
+  moving between chapters — or coming back tomorrow — lands on the sentence
+  being worked on rather than the top of the page. The threshold is a setting,
+  and so is whether it happens at all, for a library synced somewhere that
+  expects one file to stay one file.
 - **Built for long pieces, not just notes.** The editor holds spans only for a
   window around the page rather than for the whole buffer, because every span
   operation on a buffer gets slower as its span count grows — which is what
@@ -203,8 +207,9 @@ Undo survives a change of interface scale or handedness, both of which rebuild
 the whole view tree.
 
 Export produces a self-contained styled HTML file, or a paginated A4 PDF
-rendered directly from the same engine that draws the screen. Both land in an
-`Exports` folder beside your documents.
+rendered directly from the same engine that draws the screen. Local images are
+folded into the HTML itself, so the page holds together wherever the file is
+sent. Both land in an `Exports` folder beside your documents.
 
 ---
 
@@ -224,7 +229,7 @@ your own key instead, copy `keystore.properties.example` to
 
 ### Tests
 
-125 tests, all passing. They cover the parts that would otherwise fail silently:
+263 tests, all passing. They cover the parts that would otherwise fail silently:
 
 - **`PureLogicTest`** — the density decision against a truthful Manta, a Manta
   reporting a false 160 dpi, garbage metrics and an ordinary high-density phone;
