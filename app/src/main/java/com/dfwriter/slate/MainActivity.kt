@@ -699,44 +699,93 @@ class MainActivity : Activity() {
         val limit = prefs.autoDivideWords
         if (limit <= 0) return
         val f = store.current ?: return
+        // A book the writer has just shrunk the limit on converts one part at
+        // a time as parts are opened — unless the rest is swept here, in the
+        // background, so no chapter he walks into ambushes him with a stall.
+        Manuscript.folderOf(f)?.let { folder ->
+            if (sweptFolders.add(folder.absolutePath)) divideSiblings(folder, limit)
+        }
         if (cachedWords <= limit) return
 
         val body = editor.text.toString()
-        val plan = Manuscript.plan(body, limit) ?: return
-
         dividing = true
-        try {
-            // The file has to match the buffer before it is taken apart.
-            if (!saveQuietly()) return
-            // A part of an already-divided piece is divided again where it
-            // stands; a whole document becomes a folder of its own.
-            val inPiece = Manuscript.folderOf(f)
-            val files = if (inPiece != null) {
-                Manuscript.divideInPlace(f, plan) ?: return
-            } else {
-                val folder = Manuscript.write(f, plan) ?: return
-                Manuscript.chapters(folder)
-            }
+        flash("Dividing into parts…")
+        // Planning is pure computation over a copy, and on a book-sized part
+        // it costs whole seconds this thread cannot spare. The cut itself
+        // still happens back here, where the editor lives — re-checked, since
+        // the document may have moved on while the plan was being made.
+        saveIo.execute {
+            val plan = Manuscript.plan(body, limit)
+            ui.post {
+                if (isDestroyed || isFinishing) { dividing = false; return@post }
+                try {
+                    if (plan == null) return@post
+                    if (store.current?.absolutePath != f.absolutePath) return@post
+                    if (!editor.text.contentEquals(body)) return@post
+                    // The file has to match the buffer before it is taken apart.
+                    if (!saveQuietly()) return@post
+                    // A part of an already-divided piece is divided again where
+                    // it stands; a whole document becomes a folder of its own.
+                    val inPiece = Manuscript.folderOf(f)
+                    val files = if (inPiece != null) {
+                        Manuscript.divideInPlace(f, plan) ?: return@post
+                    } else {
+                        val folder = Manuscript.write(f, plan) ?: return@post
+                        Manuscript.chapters(folder)
+                    }
 
-            // Carry on in the part the caret was in, at the same place in it,
-            // so that dividing a book mid-sentence does not move the writer.
-            val caret = editor.selectionStart
-            var consumed = 0
-            var part = 0
-            for ((i, p) in plan.parts.withIndex()) {
-                if (caret <= consumed + p.body.length) { part = i; break }
-                consumed += p.body.length
-                part = i
-            }
-            val landing = files.getOrNull(part) ?: files.firstOrNull() ?: return
-            val within = (caret - consumed).coerceAtLeast(0)
+                    // Carry on in the part the caret was in, at the same place
+                    // in it, so that dividing a book mid-sentence does not move
+                    // the writer.
+                    val caret = editor.selectionStart
+                    var consumed = 0
+                    var part = 0
+                    for ((i, p) in plan.parts.withIndex()) {
+                        if (caret <= consumed + p.body.length) { part = i; break }
+                        consumed += p.body.length
+                        part = i
+                    }
+                    val landing = files.getOrNull(part) ?: files.firstOrNull() ?: return@post
+                    val within = (caret - consumed).coerceAtLeast(0)
 
-            loadInto(landing)
-            editor.setSelection(within.coerceIn(0, editor.text.length))
-            editor.post { editor.centreCaret() }
-            flash("Split into ${plan.parts.size} parts to stay quick")
-        } finally {
-            dividing = false
+                    loadInto(landing)
+                    editor.setSelection(within.coerceIn(0, editor.text.length))
+                    editor.post { editor.centreCaret() }
+                    flash("Split into ${plan.parts.size} parts to stay quick")
+                } finally {
+                    dividing = false
+                }
+            }
+        }
+    }
+
+    /** Books whose closed parts have already been swept this session. */
+    private val sweptFolders = HashSet<String>()
+
+    /**
+     * Divides every oversized part of [folder] except the open one, off the
+     * main thread. A closed part is a plain file: read, planned and cut
+     * without the editor, so the only part that ever needs the main thread
+     * is the one on screen. Runs on the save thread, where it takes its turn
+     * with saves and exports rather than racing them.
+     */
+    private fun divideSiblings(folder: File, limit: Int) {
+        val here = store.current?.absolutePath ?: return
+        saveIo.execute {
+            var made = 0
+            for (part in Manuscript.chapters(folder)) {
+                if (part.absolutePath == here) continue
+                val text = runCatching { part.readText(Charsets.UTF_8) }.getOrNull() ?: continue
+                if (DocStore.countWords(text) <= limit) continue
+                val plan = Manuscript.plan(text, limit) ?: continue
+                if (Manuscript.divideInPlace(part, plan) != null) made += plan.parts.size - 1
+            }
+            if (made > 0) ui.post {
+                if (isDestroyed || isFinishing) return@post
+                refreshManuscriptWords()
+                updateStatus()
+                flash("Book divided into chapter-sized parts")
+            }
         }
     }
 

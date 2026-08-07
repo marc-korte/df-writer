@@ -64,8 +64,18 @@ class AutoDivideTest {
         return a
     }
 
-    /** Lets the autosave tick come round, which is when the check happens. */
-    private fun tick() = shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(6))
+    /**
+     * Lets the autosave tick come round, which is when the check happens —
+     * and walks the division's hops: the plan is made on the save thread,
+     * applied on the main one, and the rest of the book swept behind it.
+     */
+    private fun tick(a: MainActivity) {
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(6))
+        repeat(2) {
+            a.drainSaves()
+            shadowOf(Looper.getMainLooper()).idle()
+        }
+    }
 
     private fun editorOf(a: MainActivity): MarkdownEditor {
         fun find(v: View): MarkdownEditor? = when {
@@ -90,7 +100,7 @@ class AutoDivideTest {
     fun `a long document divides itself and keeps every word`() {
         val original = doc.readText()
         val a = start()
-        tick()
+        tick(a)
 
         val folder = File(lib, "novel")
         assertTrue("the piece should have been divided", folder.isDirectory)
@@ -113,7 +123,7 @@ class AutoDivideTest {
         editor.setSelection(0)
         shadowOf(Looper.getMainLooper()).idle()
 
-        tick()
+        tick(a)
 
         val now = editorOf(a)
         val parts = Manuscript.chapters(File(lib, "novel"))
@@ -134,7 +144,7 @@ class AutoDivideTest {
         editor.setSelection(at)
         shadowOf(Looper.getMainLooper()).idle()
 
-        tick()
+        tick(a)
 
         val now = editorOf(a)
         val around = now.text.toString()
@@ -150,7 +160,7 @@ class AutoDivideTest {
     fun `the whole piece is counted, not just the part on screen`() {
         val original = doc.readText()
         val a = start()
-        tick()
+        tick(a)
 
         val expected = DocStore.countWords(original)
         assertTrue(
@@ -162,10 +172,10 @@ class AutoDivideTest {
     @Test
     fun `a divided piece is not divided again`() {
         val a = start()
-        tick()
+        tick(a)
         val after = Manuscript.chapters(File(lib, "novel")).size
-        tick()
-        tick()
+        tick(a)
+        tick(a)
         assertEquals(
             "the parts should be left alone once made",
             after, Manuscript.chapters(File(lib, "novel")).size
@@ -176,7 +186,7 @@ class AutoDivideTest {
     @Test
     fun `the contents drawer covers the whole piece, not just the open part`() {
         val a = start()
-        tick()
+        tick(a)
         val parts = Manuscript.chapters(File(lib, "novel"))
         assertTrue("this test needs a divided piece", parts.size >= 2)
 
@@ -205,7 +215,7 @@ class AutoDivideTest {
     fun `exporting a divided piece exports the whole book`() {
         val original = doc.readText()
         val a = start()
-        tick()
+        tick(a)
         val parts = Manuscript.chapters(File(lib, "novel"))
         assertTrue("this test needs a divided piece", parts.size >= 2)
 
@@ -248,7 +258,7 @@ class AutoDivideTest {
     @Test
     fun `nothing is exported from parts that could not be brought up to date`() {
         val a = start()
-        tick()
+        tick(a)
         val folder = File(lib, "novel")
         assertTrue("this test needs a divided piece", Manuscript.chapters(folder).size >= 2)
 
@@ -304,10 +314,42 @@ class AutoDivideTest {
     }
 
     @Test
+    fun `the rest of the book divides in the background`() {
+        // A book already divided under an older, larger limit: the open part
+        // converts in place, and every closed part must follow on its own,
+        // without being visited — walking into a chapter must never cost the
+        // stall of dividing it first.
+        doc.delete()
+        val folder = File(lib, "novel").apply { mkdirs() }
+        val one = File(folder, "01 One.md").apply { writeText(novel(12_000)) }
+        val two = File(folder, "02 Two.md").apply { writeText(novel(12_000)) }
+        val whole = one.readText() + two.readText()
+        prefs.lastFile = one.absolutePath
+
+        val a = start()
+        tick(a)
+        tick(a)
+
+        val parts = Manuscript.chapters(folder)
+        assertTrue(
+            "the open part should have divided in place: ${parts.map { it.name }}",
+            parts.count { it.name.startsWith("01") } >= 2
+        )
+        assertTrue(
+            "the closed part should have divided in the background: ${parts.map { it.name }}",
+            parts.count { it.name.startsWith("02") } >= 2
+        )
+        assertEquals(
+            "and the book must still be the book, character for character",
+            whole, parts.joinToString("") { it.readText() }
+        )
+    }
+
+    @Test
     fun `switched off, a long document stays one file`() {
         prefs.autoDivideWords = 0
         val a = start()
-        tick()
+        tick(a)
         assertTrue("division is off; the file must be left alone", doc.isFile)
         assertFalse(File(lib, "novel").isDirectory)
         editorOf(a)
@@ -317,7 +359,7 @@ class AutoDivideTest {
     fun `a short document is left as one file`() {
         doc.writeText(novel(1_500))
         val a = start()
-        tick()
+        tick(a)
         assertTrue("a short piece must not be divided", doc.isFile)
         assertFalse(File(lib, "novel").isDirectory)
         editorOf(a)

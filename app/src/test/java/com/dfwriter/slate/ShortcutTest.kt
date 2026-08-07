@@ -388,6 +388,19 @@ class ShortcutTest {
         )
     }
 
+    @Test
+    fun `typing after a jump releases the page to the caret`() {
+        setDoc(book(20_000), 0)
+        settle()
+        chord(KeyEvent.KEYCODE_O, shift = true)
+        clickRow("Chapter 20")
+        assertTrue("the jump should still be settling", editor.settling())
+        // The first character typed hands the page back: nothing may keep
+        // re-placing the jump target while the writer is already writing.
+        plainKey(KeyEvent.KEYCODE_A)
+        assertTrue("typing must end the settle window", !editor.settling())
+    }
+
     // --------------------------------------------------------------- panels
 
     @Test

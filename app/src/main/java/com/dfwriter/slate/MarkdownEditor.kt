@@ -105,8 +105,10 @@ class MarkdownEditor @JvmOverloads constructor(
 
             override fun afterTextChanged(e: Editable?) {
                 if (styling || e == null) return
-                // Typing is its own signal of where you are.
+                // Typing is its own signal of where you are — and the page
+                // must follow the caret now, not keep re-placing the jump.
                 if (arrival != null) clearArrival.run()
+                settleTarget = -1
                 record(changeStart, removed, inserted)
                 onEdit?.invoke(e.length)
                 val big = (changeEnd - changeStart) > 240
@@ -893,6 +895,9 @@ class MarkdownEditor @JvmOverloads constructor(
 
     /** For tests: whether the you-are-here signals are currently showing. */
     internal fun arrivalShowing(): Boolean = arrival != null
+
+    /** For tests: whether a jump is still re-placing its target. */
+    internal fun settling(): Boolean = settleTarget >= 0
 
     private fun placeAtTop(offset: Int) {
         val l = layout ?: return
