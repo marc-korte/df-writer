@@ -123,6 +123,17 @@ class MainActivity : Activity() {
         editor.applySoftInputPolicy()
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // View focus can be dropped around the IME window-flag changes on this
+        // device, and an editor without it draws no caret and hears no keys.
+        // Whenever the window comes forward with no panel up, the editor is
+        // the only thing focus could mean.
+        if (hasFocus && !sheetsOpen() && findBar.visibility != View.VISIBLE) {
+            editor.requestFocus()
+        }
+    }
+
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         // This activity is singleTask, so without setIntent it keeps its very

@@ -65,7 +65,10 @@ class MarkdownEditor @JvmOverloads constructor(
         setPadding(0, 0, 0, 0)
         gravity = android.view.Gravity.TOP or android.view.Gravity.START
         setTextColor(Ink.TEXT)
-        highlightColor = 0x33000000
+        // Dark enough to survive 1-bit dithering: at 20% the selection
+        // disappears on the panel, and with the caret hidden during selection
+        // that made shift-arrow editing completely blind.
+        highlightColor = 0x55000000
         overScrollMode = View.OVER_SCROLL_NEVER
         isVerticalScrollBarEnabled = false
         isHorizontalScrollBarEnabled = false
@@ -797,15 +800,37 @@ class MarkdownEditor @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        if (!isFocused) return
+        // View focus on this device is flaky around window-flag changes, and a
+        // caret that vanishes with it reads as being lost. Drawn whenever the
+        // window is in front: a panel that takes focus covers the editor
+        // anyway, so an always-on caret behind it costs nothing.
+        if (!isFocused && !hasWindowFocus()) return
         val l = layout ?: return
-        val sel = selectionStart
-        if (sel < 0 || sel != selectionEnd) return
+        // During a selection the caret sits at the ACTIVE end — the one the
+        // arrows are moving — not hidden. Hiding it made shift-arrow editing
+        // a blind operation on a panel whose highlight barely dithers through.
+        val sel = selectionEnd
+        if (sel < 0) return
 
         val line = l.getLineForOffset(sel)
-        val x = l.getPrimaryHorizontal(sel) + totalPaddingLeft - scrollX
-        val top = l.getLineTop(line) + totalPaddingTop - scrollY
-        val bottom = l.getLineBottom(line) + totalPaddingTop - scrollY
+        // Content coordinates: the framework has already translated the canvas
+        // by the scroll before onDraw. Subtracting the scroll again — as this
+        // code did from the first commit — drew the caret twice the scroll
+        // height above the page: visible at the top of a note, never once in
+        // a scrolled manuscript. Every "there is no caret" report was this.
+        val x = l.getPrimaryHorizontal(sel) + totalPaddingLeft
+        val top = l.getLineTop(line) + totalPaddingTop
+        val bottom = l.getLineBottom(line) + totalPaddingTop
+
+        // A second, unmissable channel: a tick in the left margin beside the
+        // caret's line. The gutter is otherwise empty, so whatever the panel's
+        // update mode does to a moving in-text bar, the line you are on is
+        // always flagged at the edge of the page.
+        canvas.drawRect(
+            (scrollX).toFloat(), top + (bottom - top) * 0.25f,
+            scrollX + Scale.mm(1.2f), bottom - (bottom - top) * 0.25f,
+            caretPaint
+        )
         // A millimetre wide at rest: at 300 PPI a hairline caret disappears
         // into the text, and with no blink there is nothing else to catch the
         // eye — arrow-key editing is blind without a bar that can be seen.
@@ -876,6 +901,12 @@ class MarkdownEditor @JvmOverloads constructor(
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         viewTreeObserver.addOnGlobalLayoutListener(settleOnLayout)
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        // The caret's visibility gate just changed either way; repaint it.
+        invalidate()
     }
 
     // ------------------------------------------------------------- arrival
