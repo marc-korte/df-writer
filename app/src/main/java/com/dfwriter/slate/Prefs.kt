@@ -107,11 +107,11 @@ class Prefs(ctx: Context) {
      * The paged buffer: the editor's text view holds only a page of the
      * document around the caret, because this device's framework re-lays-out
      * everything below an edit and what the view holds is what a keystroke
-     * costs. Off until it has real writing behind it; the un-paged path
-     * stays selectable as the escape hatch.
+     * costs. On by default — it is the difference between typing and waiting on
+     * this panel; the un-paged path stays selectable as the escape hatch.
      */
     var pagedBuffer: Boolean
-        get() = sp.getBoolean("pagedBuffer", false)
+        get() = sp.getBoolean("pagedBuffer", true)
         set(v) = sp.edit().putBoolean("pagedBuffer", v).apply()
 
     var libraryPath: String

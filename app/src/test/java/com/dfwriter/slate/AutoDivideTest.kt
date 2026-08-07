@@ -138,17 +138,18 @@ class AutoDivideTest {
     fun `a caret deep in the book lands in the part that holds it`() {
         val a = start()
         val editor = editorOf(a)
-        val whole = editor.text.toString()
-        // Somewhere in the last third, at a word boundary.
+        val whole = editor.documentText()
+        // Somewhere in the last third, at a word boundary. Global offsets:
+        // under the paged buffer the Editable holds only a page of the book.
         val at = whole.indexOf("## Chapter", (whole.length * 0.8).toInt())
-        editor.setSelection(at)
+        editor.setSelectionGlobal(at)
         shadowOf(Looper.getMainLooper()).idle()
 
         tick(a)
 
         val now = editorOf(a)
-        val around = now.text.toString()
-            .substring(now.selectionStart.coerceIn(0, now.text.length))
+        val around = now.documentText()
+            .substring(now.globalSelectionStart().coerceIn(0, now.docLength()))
             .take(12)
         assertTrue(
             "expected to land on the same chapter, landed on: $around",

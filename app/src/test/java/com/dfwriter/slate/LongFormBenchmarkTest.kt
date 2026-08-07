@@ -298,6 +298,10 @@ class LongFormBenchmarkTest {
      */
     @Test
     fun `an extension that reaches the page asks for layout`() {
+        // The un-paged path — still shipped as the escape hatch, and its
+        // span-window extension still owes a layout pass when it touches
+        // the screen. The paged path supersedes this with splices.
+        Prefs(RuntimeEnvironment.getApplication()).pagedBuffer = false
         val (editor, _) = activityEditor(40_000)
         val (s0, e0) = editor.styledWindow()
         assertTrue("this test needs a bounded window to extend", e0 < editor.text.length)
