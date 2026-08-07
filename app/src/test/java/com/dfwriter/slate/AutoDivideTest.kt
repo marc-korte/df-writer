@@ -202,6 +202,47 @@ class AutoDivideTest {
     }
 
     @Test
+    fun `exporting a divided piece exports the whole book`() {
+        val original = doc.readText()
+        val a = start()
+        tick()
+        val parts = Manuscript.chapters(File(lib, "novel"))
+        assertTrue("this test needs a divided piece", parts.size >= 2)
+
+        // Ctrl Shift M — export to HTML — from inside the first part.
+        a.dispatchKeyEvent(
+            android.view.KeyEvent(
+                0, 0, android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_M, 0,
+                android.view.KeyEvent.META_CTRL_ON or android.view.KeyEvent.META_CTRL_LEFT_ON or
+                        android.view.KeyEvent.META_SHIFT_ON or android.view.KeyEvent.META_SHIFT_LEFT_ON
+            )
+        )
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val html = File(File(lib, "Exports"), "novel.html")
+        assertTrue("nothing was exported, library holds ${lib.list()?.toList()}", html.isFile)
+        val text = html.readText()
+
+        // The last chapter of the last part is the proof: it is nowhere in the
+        // part that was open when the export ran.
+        val lastChapter = Regex("## (Chapter \\d+)")
+            .findAll(parts.last().readText()).last().groupValues[1]
+        assertFalse(
+            "this test proves nothing if the open part already held $lastChapter",
+            parts.first().readText().contains(lastChapter)
+        )
+        assertTrue(
+            "the export stopped at the open part: $lastChapter is missing",
+            text.contains(lastChapter)
+        )
+
+        // And every chapter of the book, in order.
+        val exported = Regex("Chapter (\\d+)").findAll(text).map { it.groupValues[1].toInt() }.toList()
+        val whole = Regex("## Chapter (\\d+)").findAll(original).map { it.groupValues[1].toInt() }.toList()
+        assertEquals("the export must hold every chapter, in reading order", whole, exported)
+    }
+
+    @Test
     fun `a short document is left as one file`() {
         doc.writeText(novel(2_000))
         val a = start()

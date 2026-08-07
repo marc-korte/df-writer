@@ -632,8 +632,6 @@ class MainActivity : Activity() {
         if (dividing) return
         val f = store.current ?: return
         if (cachedWords <= Manuscript.TARGET_WORDS) return
-        // Already one part of a longer piece; parts are not divided again.
-        if (Manuscript.folderOf(f) != null) return
 
         val body = editor.text.toString()
         val plan = Manuscript.plan(body) ?: return
@@ -642,7 +640,15 @@ class MainActivity : Activity() {
         try {
             // The file has to match the buffer before it is taken apart.
             if (!saveQuietly()) return
-            val folder = Manuscript.write(f, plan) ?: return
+            // A part of an already-divided piece is divided again where it
+            // stands; a whole document becomes a folder of its own.
+            val inPiece = Manuscript.folderOf(f)
+            val files = if (inPiece != null) {
+                Manuscript.divideInPlace(f, plan) ?: return
+            } else {
+                val folder = Manuscript.write(f, plan) ?: return
+                Manuscript.chapters(folder)
+            }
 
             // Carry on in the part the caret was in, at the same place in it,
             // so that dividing a book mid-sentence does not move the writer.
@@ -654,7 +660,6 @@ class MainActivity : Activity() {
                 consumed += p.body.length
                 part = i
             }
-            val files = Manuscript.chapters(folder)
             val landing = files.getOrNull(part) ?: files.firstOrNull() ?: return
             val within = (caret - consumed).coerceAtLeast(0)
 
@@ -1320,12 +1325,28 @@ class MainActivity : Activity() {
 
     // -------------------------------------------------------------- exports
 
+    /**
+     * What an export should contain: the whole piece, not the part on screen.
+     *
+     * A divided manuscript is compiled from its files in reading order, which
+     * means the open part has to reach the card first — the buffer is usually
+     * ahead of it. A document that stands alone is taken from the buffer as it
+     * always was.
+     */
+    private fun exportSource(): Pair<String, String> {
+        val f = store.current
+        val folder = f?.let { Manuscript.folderOf(it) }
+            ?: return editor.text.toString() to (f?.nameWithoutExtension ?: "document")
+        if (store.dirty) saveQuietly()
+        return Manuscript.compile(folder) to folder.name
+    }
+
     private fun exportHtml() {
-        val name = (store.current?.nameWithoutExtension ?: "document")
+        val (body, name) = exportSource()
         val out = File(exportDir(), "$name.html")
         runCatching {
             out.parentFile?.mkdirs()
-            out.writeText(Exporter.toHtml(editor.text.toString(), name), Charsets.UTF_8)
+            out.writeText(Exporter.toHtml(body, name), Charsets.UTF_8)
         }.onSuccess { flash("HTML → ${out.absolutePath}") }
             .onFailure { flash("Export failed: ${it.message}") }
     }
@@ -1333,15 +1354,17 @@ class MainActivity : Activity() {
     private fun exportPdf() {
         // A second run would be drawing into the same file as the first.
         if (exporting) { flash("Still building the last PDF…"); return }
-        val name = (store.current?.nameWithoutExtension ?: "document")
+        val (body, name) = exportSource()
         val out = File(exportDir(), "$name.pdf")
-        val body = editor.text.toString()
+        // Pictures are named relative to the part they sit in, which is inside
+        // the manuscript folder rather than beside it.
+        val dir = store.current?.parentFile
         flash("Building PDF…")
         exporting = true
         // Laying out and drawing every page is far too slow for the main thread
         // on an RK3566; a long document would trip the ANR watchdog.
         Thread {
-            val result = runCatching { Exporter.toPdf(body, prefs, out, name) }
+            val result = runCatching { Exporter.toPdf(body, prefs, out, name, dir) }
             ui.post {
                 exporting = false
                 // The thread outlives the activity, and a message posted from it

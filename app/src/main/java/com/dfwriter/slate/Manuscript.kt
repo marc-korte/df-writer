@@ -209,13 +209,66 @@ object Manuscript {
     fun folderOf(f: File): File? =
         f.parentFile?.takeIf { NUMBERED.containsMatchIn(f.name) && isManuscript(it) }
 
+    /** The leading number of a part's file name, sub-numbers included. */
+    private fun numberOf(name: String): String? =
+        Regex("^(\\d{2,}(?:-\\d+)*) ").find(name)?.groupValues?.get(1)
+
+    /**
+     * Divides one part of an already-divided piece, in place.
+     *
+     * Nothing is renamed. The first piece stays in the file it came from — the
+     * one that may be open at this moment — and the rest are added beside it
+     * with sub-numbers, which sort into the right place on their own. Renaming
+     * a shelf full of files to make room would mean renaming the file being
+     * written in, and a rename that fails halfway would leave the book in an
+     * order nobody chose.
+     *
+     * The new pieces are written before the original is shortened, so an
+     * interruption leaves the tail of the part twice over rather than not at
+     * all. Duplicated text can be seen and deleted; lost text cannot.
+     */
+    fun divideInPlace(part: File, plan: Plan): List<File>? {
+        val folder = part.parentFile ?: return null
+        val number = numberOf(part.name) ?: return null
+        if (plan.parts.size < 2) return null
+
+        val added = ArrayList<File>()
+        for (i in 1 until plan.parts.size) {
+            val piece = plan.parts[i]
+            val stem = DocStore.slug(piece.title).take(48).ifEmpty { "part" }
+            val f = File(folder, "$number-${i + 1} $stem.md")
+            val ok = !f.exists() &&
+                    runCatching { f.writeText(piece.body, Charsets.UTF_8); true }.getOrDefault(false)
+            if (!ok) {
+                added.forEach { runCatching { it.delete() } }
+                return null
+            }
+            added.add(f)
+        }
+
+        val shortened = runCatching {
+            part.writeText(plan.parts[0].body, Charsets.UTF_8); true
+        }.getOrDefault(false)
+        if (!shortened) {
+            added.forEach { runCatching { it.delete() } }
+            return null
+        }
+        return listOf(part) + added
+    }
+
     /** Every chapter joined back into one piece, for export. */
     fun compile(folder: File): String =
         chapters(folder).joinToString("\n\n") {
             runCatching { it.readText(Charsets.UTF_8).trim('\n') }.getOrDefault("")
         } + "\n"
 
-    private val NUMBERED = Regex("^\\d{2,} ")
+    /**
+     * A part's number, which may carry sub-numbers from having been divided
+     * again: 04, then 04-2, then 04-2-2. Ordering still falls out of a plain
+     * alphabetical sort, because a space sorts before a hyphen — "04 " comes
+     * before "04-2 ", which comes before "05 ".
+     */
+    private val NUMBERED = Regex("^\\d{2,}(-\\d+)* ")
     private val HEADING = Regex("^#{1,6}\\s+")
 
     /**

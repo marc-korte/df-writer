@@ -189,6 +189,71 @@ class ManuscriptTest {
         assertNull(Manuscript.folderOf(File(notes, "shopping.md")))
     }
 
+    // --------------------------------------------------- dividing again
+
+    @Test
+    fun `a part that outgrows the target divides again where it stands`() {
+        val dir = tempDir()
+        val source = File(dir, "Book.md")
+        source.writeText(book(60_000))
+        val folder = Manuscript.write(source, Manuscript.plan(source.readText(), 25_000)!!)!!
+        val before = Manuscript.chapters(folder)
+
+        // The writer keeps going in the last part until it is too long itself.
+        val grown = before.last()
+        val longer = grown.readText() + book(40_000)
+        grown.writeText(longer)
+
+        val pieces = Manuscript.divideInPlace(grown, Manuscript.plan(longer, 25_000)!!)
+        assertNotNull("a part must be able to divide again", pieces)
+
+        assertEquals(
+            "the part and its new pieces must be the text that was there",
+            longer, pieces!!.joinToString("") { it.readText() }
+        )
+        assertEquals(
+            "the file being written in must keep its name",
+            grown.absolutePath, pieces.first().absolutePath
+        )
+    }
+
+    @Test
+    fun `the new pieces sort into the right place`() {
+        val dir = tempDir()
+        val source = File(dir, "Book.md")
+        source.writeText(book(60_000))
+        val folder = Manuscript.write(source, Manuscript.plan(source.readText(), 25_000)!!)!!
+        val order = Manuscript.chapters(folder)
+
+        // Divide a part in the middle, where the ordering is easiest to break.
+        val middle = order[1]
+        val longer = middle.readText() + book(40_000)
+        middle.writeText(longer)
+        Manuscript.divideInPlace(middle, Manuscript.plan(longer, 25_000)!!)!!
+
+        val after = Manuscript.chapters(folder)
+        assertEquals(
+            "reading order must still be plain alphabetical order",
+            after.map { it.name }, after.map { it.name }.sorted()
+        )
+        val at = after.indexOfFirst { it.name == middle.name }
+        assertTrue("the new pieces must follow the part they came from",
+            after[at + 1].name.startsWith(middle.name.substringBefore(' ') + "-"))
+        assertTrue("and still come before the next part",
+            after.last().name.startsWith("03 ") || after.last().name.startsWith("04 "))
+        assertTrue("a divided part is still recognised as a manuscript",
+            Manuscript.isManuscript(folder))
+    }
+
+    @Test
+    fun `a part divided twice still sorts correctly`() {
+        val names = listOf("01 a.md", "02 b.md", "02-2 c.md", "02-2-2 d.md", "03 e.md")
+        assertEquals(
+            "sub-numbered parts must sort between their neighbours",
+            names, names.sorted()
+        )
+    }
+
     @Test
     fun `compiling puts the book back in order`() {
         val dir = tempDir()
