@@ -465,6 +465,25 @@ class TableDividerSpan(
     }
 }
 
+/**
+ * The you-are-here band a jump paints across its landing line, because a
+ * steady two-pixel caret at 300 PPI is not an arrival signal anyone can see.
+ * Deliberately not a [SlateSpan]: the styler would strip it on the very
+ * restyle the jump itself causes. The editor removes it, a moment later.
+ */
+class ArrivalSpan(private val color: Int = 0xFFDCDCDC.toInt()) : LineBackgroundSpan {
+    override fun drawBackground(
+        canvas: Canvas, paint: Paint, left: Int, right: Int,
+        top: Int, baseline: Int, bottom: Int,
+        text: CharSequence, start: Int, end: Int, lineNumber: Int
+    ) {
+        val old = paint.color
+        paint.color = color
+        canvas.drawRect(left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat(), paint)
+        paint.color = old
+    }
+}
+
 /** Extra breathing room above a block, in the spirit of Typora's spacing. */
 class SpaceAboveSpan(private val px: Int) : android.text.style.LineHeightSpan, SlateSpan {
     override fun chooseHeight(

@@ -859,7 +859,12 @@ class MainActivity : Activity() {
         sheet.configure("Outline", "Jump to a heading…", items)
         sheet.onPick = { item ->
             closeSheets()
-            (item.payload as? Int)?.let { goTo(it) }
+            (item.payload as? Int)?.let {
+                // Acknowledged before the jump's relayout grinds, so the tap
+                // reads as taken rather than the panel as frozen.
+                flash("→ ${item.title}")
+                goTo(it)
+            }
         }
         sheet.onFreeText = null
         sheet.show()
@@ -925,8 +930,14 @@ class MainActivity : Activity() {
         contents.onFreeText = null
         contents.onPick = { item ->
             when (val p = item.payload) {
-                is Int -> goTo(p)
+                is Int -> {
+                    flash("→ ${item.title}")
+                    goTo(p)
+                }
                 is Jump -> {
+                    // Before the part loads: opening a part is the expensive
+                    // half, and the drawer must not read as frozen meanwhile.
+                    flash("→ ${item.title}")
                     if (p.file.absolutePath != store.current?.absolutePath) {
                         openWithSave(p.file)
                     }
@@ -1046,9 +1057,9 @@ class MainActivity : Activity() {
         ),
         SettingsSheet.Row(
             "Auto-divide",
-            { if (prefs.autoDivideWords <= 0) "off" else "${prefs.autoDivideWords / 1000}k words" },
-            { d -> prefs.autoDivideWords = (prefs.autoDivideWords + d * 5_000).coerceIn(0, 100_000) },
-            "split a long piece into parts"
+            { if (prefs.autoDivideWords <= 0) "off" else "${prefs.autoDivideWords} words" },
+            { d -> prefs.autoDivideWords = (prefs.autoDivideWords + d * 1_000).coerceIn(0, 100_000) },
+            "smaller parts type faster"
         ),
         SettingsSheet.Row(
             "Panel",
@@ -1728,6 +1739,7 @@ class MainActivity : Activity() {
             flash("No heading called “$anchor”")
             return
         }
+        flash("→ ${heading.title}")
         goTo(heading.offset)
     }
 

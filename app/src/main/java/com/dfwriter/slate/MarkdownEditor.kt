@@ -105,6 +105,8 @@ class MarkdownEditor @JvmOverloads constructor(
 
             override fun afterTextChanged(e: Editable?) {
                 if (styling || e == null) return
+                // Typing is its own signal of where you are.
+                if (arrival != null) clearArrival.run()
                 record(changeStart, removed, inserted)
                 onEdit?.invoke(e.length)
                 val big = (changeEnd - changeStart) > 240
@@ -130,6 +132,8 @@ class MarkdownEditor @JvmOverloads constructor(
                 downY = event.y
                 downAt = event.eventTime
                 notATap = false
+                // The reader has taken the page back; stop re-placing it.
+                settleTarget = -1
             }
             // Straying past the slop at any point rules the gesture out for
             // good. Comparing only where the finger went down and came up would
@@ -712,7 +716,10 @@ class MarkdownEditor @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         handler.removeCallbacks(extendWindow)
+        handler.removeCallbacks(settleDone)
+        handler.removeCallbacks(clearArrival)
         pendingRestyle?.let { handler.removeCallbacks(it) }
+        viewTreeObserver.removeOnGlobalLayoutListener(settleOnLayout)
         super.onDetachedFromWindow()
     }
 
@@ -784,7 +791,9 @@ class MarkdownEditor @JvmOverloads constructor(
         val x = l.getPrimaryHorizontal(sel) + totalPaddingLeft - scrollX
         val top = l.getLineTop(line) + totalPaddingTop - scrollY
         val bottom = l.getLineBottom(line) + totalPaddingTop - scrollY
-        val w = max(2f, Scale.pt(1.5f))
+        // Thicker for a few seconds after a jump, so the eye can find it.
+        val pt = if (System.currentTimeMillis() < caretBoostUntil) 3.5f else 1.5f
+        val w = max(2f, Scale.pt(pt))
         val inset = (bottom - top) * 0.10f
         canvas.drawRect(x, top + inset, x + w, bottom - inset, caretPaint)
     }
@@ -812,13 +821,78 @@ class MarkdownEditor @JvmOverloads constructor(
         requestFocus()
         setSelection(at)
         placeAtTop(at)
-        post {
-            post {
-                if (::prefs.isInitialized && prefs.typewriterMode) centreCaret()
-                else placeAtTop(at)
-            }
-        }
+        markArrival(at)
+        // The second placement runs off the layout pass the first one causes,
+        // not off a guessed pair of posts: the styled window rebuilds around
+        // the target and its heights land only when the tree lays out again —
+        // on the device that can be well after two message-loop turns. The
+        // posted fallback covers the jump that needed no rebuild at all.
+        settleTarget = at
+        handler.removeCallbacks(settleDone)
+        handler.postDelayed(settleDone, SETTLE_WINDOW_MS)
     }
+
+    /**
+     * While a jump is settling, every layout pass re-places the target: the
+     * rebuild's heights land whenever the device's traversal gets to them —
+     * behind stray passes from the closing panel, and well over a second on
+     * a long part — so no single moment can be trusted to be "after". A
+     * touch takes the page back for the reader and ends the window early.
+     */
+    private var settleTarget = -1
+
+    private val settleDone = Runnable {
+        val at = settleTarget
+        settleTarget = -1
+        if (at >= 0) placeSettled(at)
+    }
+
+    private fun placeSettled(at: Int) {
+        if (::prefs.isInitialized && prefs.typewriterMode) centreCaret() else placeAtTop(at)
+    }
+
+    private val settleOnLayout = android.view.ViewTreeObserver.OnGlobalLayoutListener {
+        if (settleTarget >= 0) placeSettled(settleTarget)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        viewTreeObserver.addOnGlobalLayoutListener(settleOnLayout)
+    }
+
+    // ------------------------------------------------------------- arrival
+
+    /**
+     * A steady two-pixel caret at 300 PPI is not an arrival signal anyone can
+     * see, and on E Ink there is no blink to catch the eye. A jump therefore
+     * paints a band across its landing line for a moment, and thickens the
+     * caret for a few seconds — one partial refresh in, one out.
+     */
+    private var arrival: ArrivalSpan? = null
+    private var caretBoostUntil = 0L
+
+    private val clearArrival = Runnable {
+        arrival?.let { text?.removeSpan(it) }
+        arrival = null
+        invalidate()
+    }
+
+    private fun markArrival(at: Int) {
+        val e = text ?: return
+        arrival?.let { e.removeSpan(it) }
+        val ls = MarkdownStyler.lineStartOf(e, at)
+        val le = MarkdownStyler.lineEndOf(e, at)
+        val span = ArrivalSpan()
+        e.setSpan(span, ls, (le + 1).coerceAtMost(e.length), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        arrival = span
+        caretBoostUntil = System.currentTimeMillis() + CARET_BOOST_MS
+        handler.removeCallbacks(clearArrival)
+        handler.postDelayed(clearArrival, ARRIVAL_MS)
+        invalidate()
+    }
+
+    /** For tests: whether the you-are-here signals are currently showing. */
+    internal fun arrivalShowing(): Boolean = arrival != null
 
     private fun placeAtTop(offset: Int) {
         val l = layout ?: return
@@ -842,6 +916,14 @@ class MarkdownEditor @JvmOverloads constructor(
     override fun bringPointIntoView(offset: Int): Boolean {
         if (::prefs.isInitialized && prefs.typewriterMode) {
             centreCaret()
+            return true
+        }
+        // After a selection change the framework brings the caret into view on
+        // the next draw, by its own rules — which would quietly override a
+        // jump's placement moments after it was made. While a jump is
+        // settling, its placement is the one that stands.
+        if (settleTarget >= 0) {
+            placeAtTop(settleTarget)
             return true
         }
         return super.bringPointIntoView(offset)
@@ -1048,5 +1130,14 @@ class MarkdownEditor @JvmOverloads constructor(
          * than a manuscript.
          */
         private const val EXTRACT_WINDOW = 1024
+
+        /** How long the landing-line band stays up after a jump. */
+        private const val ARRIVAL_MS = 1600L
+
+        /** How long the caret stays thickened after a jump. */
+        private const val CARET_BOOST_MS = 4000L
+
+        /** How long a jump keeps re-placing its target as layouts land. */
+        private const val SETTLE_WINDOW_MS = 3000L
     }
 }

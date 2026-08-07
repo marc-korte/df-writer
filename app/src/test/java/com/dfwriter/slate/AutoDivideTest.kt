@@ -315,7 +315,7 @@ class AutoDivideTest {
 
     @Test
     fun `a short document is left as one file`() {
-        doc.writeText(novel(2_000))
+        doc.writeText(novel(1_500))
         val a = start()
         tick()
         assertTrue("a short piece must not be divided", doc.isFile)

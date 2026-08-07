@@ -348,10 +348,16 @@ object Manuscript {
     private val HEADING = Regex("^#{1,6}\\s+")
 
     /**
-     * How many words a part is filled to. Measured on the device: a file this
-     * size opens in well under a second and types within a dozen milliseconds
-     * of a short note, where a hundred thousand words takes six seconds to open
-     * and types with a noticeable lag.
+     * How many words a part is filled to — a long chapter, not a novella.
+     *
+     * Profiled on the device: an insert costs time linear in the text AFTER
+     * the caret — the ROM's layout patches re-lay-out everything below the
+     * edit — at roughly 37 µs per character. Appending is free at any size,
+     * but revising near the top of a part costs its whole tail: a 25,000-word
+     * part made that two to four seconds per keystroke. At this size the
+     * worst case stays under about three-quarters of a second, and the
+     * typical mid-part edit under half that. The earlier 25,000-word figure
+     * was measured while typing at the end, where the cost hides.
      */
-    const val TARGET_WORDS = 25_000
+    const val TARGET_WORDS = 4_000
 }

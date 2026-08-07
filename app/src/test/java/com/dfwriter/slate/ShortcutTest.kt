@@ -360,6 +360,21 @@ class ShortcutTest {
             "the editor must hold focus again, or the caret is invisible",
             editor.isFocused
         )
+        assertTrue(
+            "a jump must announce itself in the status bar",
+            visibleTexts().any { it.contains("→ Chapter 20") }
+        )
+        assertTrue(
+            "the landing line must carry the you-are-here band",
+            editor.arrivalShowing() && editor.text.getSpans(at, at + 1, ArrivalSpan::class.java)
+                .isNotEmpty()
+        )
+        advance(2_000)
+        assertTrue(
+            "and the band must take itself down again",
+            !editor.arrivalShowing() &&
+                    editor.text.getSpans(0, editor.text.length, ArrivalSpan::class.java).isEmpty()
+        )
         val l = editor.layout!!
         val line = l.getLineForOffset(at)
         val screenY = l.getLineTop(line) + editor.totalPaddingTop - editor.scrollY
