@@ -806,9 +806,12 @@ class MarkdownEditor @JvmOverloads constructor(
         val x = l.getPrimaryHorizontal(sel) + totalPaddingLeft - scrollX
         val top = l.getLineTop(line) + totalPaddingTop - scrollY
         val bottom = l.getLineBottom(line) + totalPaddingTop - scrollY
-        // Thicker for a few seconds after a jump, so the eye can find it.
-        val pt = if (System.currentTimeMillis() < caretBoostUntil) 3.5f else 1.5f
-        val w = max(2f, Scale.pt(pt))
+        // A millimetre wide at rest: at 300 PPI a hairline caret disappears
+        // into the text, and with no blink there is nothing else to catch the
+        // eye — arrow-key editing is blind without a bar that can be seen.
+        // Thicker still for a few seconds after a jump.
+        val pt = if (System.currentTimeMillis() < caretBoostUntil) 5f else 3f
+        val w = max(4f, Scale.pt(pt))
         val inset = (bottom - top) * 0.10f
         canvas.drawRect(x, top + inset, x + w, bottom - inset, caretPaint)
     }
