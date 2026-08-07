@@ -77,6 +77,13 @@ class MarkdownEditor @JvmOverloads constructor(
     fun globalSelectionEnd(): Int = pageStart + selectionEnd
 
     fun setSelectionGlobal(start: Int, end: Int = start) {
+        // A target outside the page — or a page still holding a whole
+        // document it shouldn't — moves the page first.
+        if (pagedEnabled() &&
+            (start < pageStart || start > pageEnd || pageOverBudget())
+        ) {
+            splice(start)
+        }
         val e = text ?: return
         setSelection(
             (start - pageStart).coerceIn(0, e.length),
@@ -94,20 +101,26 @@ class MarkdownEditor @JvmOverloads constructor(
         val e = text
         if (e != null) {
             val len = e.length
-            // While the page is pinned to the whole document, the invariant is
-            // total: same bounds, same length, same characters. The splice
-            // engine will narrow this to the slice the page can vouch for.
-            var same = pageStart == 0 && pageEnd == docText.length && docText.length == len
+            // The page vouches for its slice. Unpaged, the slice is the whole
+            // document and the invariant is total; paged, text beyond the
+            // page answers to the mirror alone.
+            var same = (pageEnd - pageStart) == len && pageEnd <= docText.length &&
+                    (pagedEnabled() || (pageStart == 0 && pageEnd == docText.length))
             if (same) {
                 for (i in 0 until len) {
-                    if (e[i] != docText[i]) { same = false; break }
+                    if (e[i] != docText[pageStart + i]) { same = false; break }
                 }
             }
             if (!same) {
-                docText.setLength(0)
-                docText.append(e)
-                pageStart = 0
-                pageEnd = len
+                if (pagedEnabled() && pageStart >= 0 && pageStart <= docText.length) {
+                    docText.replace(pageStart, pageEnd.coerceIn(pageStart, docText.length), e.toString())
+                    pageEnd = pageStart + len
+                } else {
+                    docText.setLength(0)
+                    docText.append(e)
+                    pageStart = 0
+                    pageEnd = len
+                }
                 onMirrorRepair?.invoke()
             }
         }
@@ -116,6 +129,155 @@ class MarkdownEditor @JvmOverloads constructor(
 
     /** For tests: the mirror as-is, no verification, no repair. */
     internal fun documentTextRaw(): String = docText.toString()
+
+    /** For tests: the page's document bounds. */
+    internal fun pageBounds(): Pair<Int, Int> = pageStart to pageEnd
+
+    // -------------------------------------------------------------- splice
+
+    /**
+     * Whether the page may be narrower than the document. Off by default;
+     * pointless for anything a single page can hold anyway.
+     */
+    private fun pagedEnabled(): Boolean =
+        ::prefs.isInitialized && prefs.pagedBuffer &&
+                docText.length > PAGE_BEFORE + PAGE_AFTER + 2 * EDGE_SLACK
+
+    private fun pageOverBudget(): Boolean =
+        (pageEnd - pageStart) > PAGE_BEFORE + PAGE_AFTER + 2 * EDGE_SLACK
+
+    /**
+     * Moves the page to hold [globalCaret]. The heart of the paged buffer:
+     * the Editable is discarded and refilled with a slice of the document,
+     * cut at blank-line boundaries outside fences, and everything that spoke
+     * page coordinates is remapped or rebuilt. No text changes — the mirror
+     * is suppressed for the swap — so the document, the history, and the
+     * dirty flag are untouched.
+     */
+    private fun splice(globalCaret: Int) {
+        val doc = docText
+        val want = globalCaret.coerceIn(0, doc.length)
+        val (from, to) = choosePage(want)
+        if (from == pageStart && to == pageEnd) return
+
+        val selG = pageStart + selectionStart.coerceIn(0, text?.length ?: 0)
+        val selEndG = pageStart + selectionEnd.coerceIn(0, text?.length ?: 0)
+
+        // Anything holding page offsets dies or is remapped here.
+        pendingRestyle?.let { handler.removeCallbacks(it) }
+        pendingRestyle = null
+        pendingFrom = -1
+        pendingTo = -1
+        handler.removeCallbacks(extendWindow)
+        arrival = null   // its span dies with the old Editable
+
+        splicing = true
+        styling = true
+        try {
+            pageStart = from
+            pageEnd = to
+            styler.baseFenceParity = fenceParityAt(doc, from)
+            styler.fencesChangedAt(0)
+            setText(doc.substring(from, to))   // splicing=true: no reset, no mirror
+            winStart = 0
+            winEnd = 0
+            val e = text ?: return
+            setSelection(
+                (selG - from).coerceIn(0, e.length),
+                (selEndG - from).coerceIn(0, e.length)
+            )
+            rememberCaretLine()
+        } finally {
+            styling = false
+            splicing = false
+        }
+        restyleNow()
+    }
+
+    /**
+     * Splices when the caret has drifted too near a page edge — after typing
+     * has eroded the tail, or arrows have walked toward the top. Posted, and
+     * never run from inside a text watcher: a splice must see the edit whole.
+     */
+    private val ensurePage = Runnable {
+        if (!pagedEnabled() || splicing || styling) return@Runnable
+        val e = text ?: return@Runnable
+        val vis = visibleOffsets()
+        if (vis != null) {
+            val topG = pageStart + vis.first
+            val botG = pageStart + vis.second
+            val scrolledOffTop = pageStart > 0 && topG - pageStart < EDGE_SLACK
+            val scrolledOffEnd = pageEnd < docText.length && pageEnd - botG < EDGE_SLACK
+            if (scrolledOffTop || scrolledOffEnd) {
+                // The page follows the view; the caret clamps into it. The
+                // reader who scrolled this far away chose the view.
+                splice((topG + botG) / 2)
+                return@Runnable
+            }
+        }
+        val caretG = pageStart + selectionStart.coerceIn(0, e.length)
+        val nearTop = pageStart > 0 && (caretG - pageStart) < EDGE_SLACK
+        val nearEnd = pageEnd < docText.length && (pageEnd - caretG) < EDGE_SLACK
+        if (nearTop || nearEnd || pageOverBudget()) splice(caretG)
+    }
+
+    private fun schedulePageCheck() {
+        handler.removeCallbacks(ensurePage)
+        handler.post(ensurePage)
+    }
+
+    /**
+     * Page bounds around [caretG]: generous before the caret, a short tail
+     * after it — the tail is what a keystroke costs on this device — cut on
+     * blank-line starts whose fence parity is closed. One forward walk
+     * carries the parity, so the scan is linear in the prefix, not squared.
+     */
+    private fun choosePage(caretG: Int): Pair<Int, Int> {
+        val doc = docText
+        if (!pagedEnabled()) return 0 to doc.length
+        val wantFrom = (caretG - PAGE_BEFORE).coerceAtLeast(0)
+        val wantTo = (caretG + PAGE_AFTER).coerceAtMost(doc.length)
+
+        val searchFrom = MarkdownStyler.lineStartOf(doc, (wantFrom - CUT_SLACK).coerceAtLeast(0))
+        var parity = fenceParityAt(doc, searchFrom)
+        var from = if (wantFrom == 0) 0 else -1
+        var to = if (wantTo >= doc.length) doc.length else -1
+
+        var i = searchFrom
+        var prevBlank = searchFrom == 0
+        while (i < doc.length && (to < 0 || i <= wantTo + CUT_SLACK)) {
+            val le = MarkdownStyler.lineEndOf(doc, i)
+            // A blank-line start outside any fence is a safe cut.
+            if (prevBlank && !parity) {
+                if (i <= wantFrom) from = i
+                if (to < 0 && i >= wantTo) to = i
+            }
+            if (MarkdownStyler.isFenceLine(doc, i, le)) parity = !parity
+            prevBlank = le == i || doc.subSequence(i, le).isBlank()
+            if (le >= doc.length) break
+            i = le + 1
+        }
+        // Nowhere safe found: fall back to plain line starts, and finally to
+        // the document's edges. A rough cut styles one edge line oddly at
+        // worst; an unbounded page costs every keystroke.
+        if (from < 0) from = MarkdownStyler.lineStartOf(doc, wantFrom)
+        if (to < 0) to = MarkdownStyler.lineEndOf(doc, wantTo).coerceAtMost(doc.length)
+        if (to <= from) return 0 to doc.length
+        return from to to
+    }
+
+    /** Fence parity of everything above [offset], walked line by line. */
+    private fun fenceParityAt(doc: CharSequence, offset: Int): Boolean {
+        var parity = false
+        var i = 0
+        while (i < offset) {
+            var e2 = i
+            while (e2 < doc.length && doc[e2] != '\n') e2++
+            if (MarkdownStyler.isFenceLine(doc, i, e2)) parity = !parity
+            i = e2 + 1
+        }
+        return parity
+    }
 
     override fun setText(text: CharSequence?, type: BufferType?) {
         // Any setText that is not a splice means "this is now the whole
@@ -222,6 +384,9 @@ class MarkdownEditor @JvmOverloads constructor(
                 onEdit?.invoke(e.length)
                 val big = (changeEnd - changeStart) > 240
                 scheduleRestyle(changeStart, changeEnd, if (big) 110L else 0L)
+                // Typing erodes the page's tail; top it back up between
+                // keystrokes, never from inside the watcher.
+                if (pagedEnabled()) schedulePageCheck()
             }
         })
 
@@ -545,7 +710,6 @@ class MarkdownEditor @JvmOverloads constructor(
     private fun step(from: ArrayList<Change>, to: ArrayList<Change>, undoing: Boolean): Boolean {
         if (from.isEmpty()) return false
         val c = from.last()
-        val e = text ?: return false
         val old = if (undoing) c.after else c.before
         val new = if (undoing) c.before else c.after
         // Bounds against the DOCUMENT, not the page: a change outside the
@@ -556,9 +720,32 @@ class MarkdownEditor @JvmOverloads constructor(
             from.clear(); to.clear()
             return false
         }
-        // The page must hold the change before it can be applied. While the
-        // page is the whole document this never fires; the splice engine
-        // replaces it with a real page move.
+        // A change bigger than a page — a replace-all, a restored draft —
+        // applies to the document directly, and the page resets around it.
+        if (old.length > PAGE_BEFORE + PAGE_AFTER) {
+            from.removeAt(from.size - 1)
+            applyingHistory = true
+            try {
+                docText.replace(c.start, c.start + old.length, new.toString())
+                setText(docText.toString())
+                setSelectionGlobal(c.start + new.length)
+            } finally {
+                applyingHistory = false
+            }
+            to.add(c)
+            restyleNow()
+            return true
+        }
+        // The page must hold the change before it can be applied; move it
+        // there when it does not. The Editable is fetched only AFTER any
+        // page move — a splice replaces it, and a replace aimed at the old
+        // one lands in a buffer the writer no longer sees.
+        if (pagedEnabled() &&
+            (c.start < pageStart || c.start + old.length > pageEnd)
+        ) {
+            splice(c.start)
+        }
+        val e = text ?: return false
         val local = c.start - pageStart
         if (local < 0 || local + old.length > e.length) {
             from.clear(); to.clear()
@@ -847,10 +1034,12 @@ class MarkdownEditor @JvmOverloads constructor(
         if (!::styler.isInitialized) return
         handler.removeCallbacks(extendWindow)
         handler.post(extendWindow)
+        if (pagedEnabled()) schedulePageCheck()
     }
 
     override fun onDetachedFromWindow() {
         handler.removeCallbacks(extendWindow)
+        handler.removeCallbacks(ensurePage)
         handler.removeCallbacks(settleDone)
         handler.removeCallbacks(clearArrival)
         handler.removeCallbacks(fullRestyle)
@@ -908,6 +1097,9 @@ class MarkdownEditor @JvmOverloads constructor(
 
         if (prefs.typewriterMode) post { centreCaret() }
         onCaretMoved?.invoke()
+        // Arrow keys can walk the caret toward a page edge with no text
+        // change and no scroll; keep the page ahead of them.
+        if (movedLine && pagedEnabled()) schedulePageCheck()
         // Moving between lines swaps a rendered table row or image for its
         // source and back, which changes that line's height.
         if (movedLine) requestLayout()
@@ -974,14 +1166,18 @@ class MarkdownEditor @JvmOverloads constructor(
      * anyway.
      */
     fun jumpTo(offset: Int) {
-        val e = text ?: return
-        val at = offset.coerceIn(0, e.length)
+        val at = offset.coerceIn(0, docLength())
         // Focus first: the caret is drawn only in a focused editor, and a
         // jump whose caret cannot be seen reads as being lost.
         requestFocus()
-        setSelection(at)
-        placeAtTop(at)
-        markArrival(at)
+        if (pagedEnabled() && (at < pageStart || at > pageEnd || pageOverBudget())) {
+            splice(at)
+        }
+        val e = text ?: return
+        val local = (at - pageStart).coerceIn(0, e.length)
+        setSelection(local)
+        placeAtTop(local)
+        markArrival(local)
         // The second placement runs off the layout pass the first one causes,
         // not off a guessed pair of posts: the styled window rebuilds around
         // the target and its heights land only when the tree lays out again —
@@ -999,6 +1195,7 @@ class MarkdownEditor @JvmOverloads constructor(
      * a long part — so no single moment can be trusted to be "after". A
      * touch takes the page back for the reader and ends the window early.
      */
+    /** Document offset, like everything that must outlive a page move. */
     private var settleTarget = -1
 
     private val settleDone = Runnable {
@@ -1008,7 +1205,8 @@ class MarkdownEditor @JvmOverloads constructor(
     }
 
     private fun placeSettled(at: Int) {
-        if (::prefs.isInitialized && prefs.typewriterMode) centreCaret() else placeAtTop(at)
+        if (::prefs.isInitialized && prefs.typewriterMode) centreCaret()
+        else placeAtTop((at - pageStart).coerceIn(0, text?.length ?: 0))
     }
 
     private val settleOnLayout = android.view.ViewTreeObserver.OnGlobalLayoutListener {
@@ -1092,7 +1290,7 @@ class MarkdownEditor @JvmOverloads constructor(
         // jump's placement moments after it was made. While a jump is
         // settling, its placement is the one that stands.
         if (settleTarget >= 0) {
-            placeAtTop(settleTarget)
+            placeSettled(settleTarget)
             return true
         }
         return super.bringPointIntoView(offset)
@@ -1308,5 +1506,21 @@ class MarkdownEditor @JvmOverloads constructor(
 
         /** How long a jump keeps re-placing its target as layouts land. */
         private const val SETTLE_WINDOW_MS = 3000L
+
+        /**
+         * Page geometry. Generous before the caret — scrollback context —
+         * and a short tail after it, because on this device the tail is what
+         * every keystroke costs: the framework re-lays-out everything below
+         * an edit at roughly 37 µs per character. Three thousand keeps the
+         * worst insert near a tenth of a second.
+         */
+        private const val PAGE_BEFORE = 8_000
+        private const val PAGE_AFTER = 3_000
+
+        /** How close the caret or view may come to a page edge. */
+        private const val EDGE_SLACK = 800
+
+        /** How far past the budget the cut-point search may roam. */
+        private const val CUT_SLACK = 1_200
     }
 }

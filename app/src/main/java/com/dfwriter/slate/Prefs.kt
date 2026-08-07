@@ -103,6 +103,17 @@ class Prefs(ctx: Context) {
         get() = sp.getInt("autoDivideWords", Manuscript.TARGET_WORDS)
         set(v) = sp.edit().putInt("autoDivideWords", v).apply()
 
+    /**
+     * The paged buffer: the editor's text view holds only a page of the
+     * document around the caret, because this device's framework re-lays-out
+     * everything below an edit and what the view holds is what a keystroke
+     * costs. Off until it has real writing behind it; the un-paged path
+     * stays selectable as the escape hatch.
+     */
+    var pagedBuffer: Boolean
+        get() = sp.getBoolean("pagedBuffer", false)
+        set(v) = sp.edit().putBoolean("pagedBuffer", v).apply()
+
     var libraryPath: String
         get() = sp.getString("libraryPath", "")!!
         set(v) = sp.edit().putString("libraryPath", v).apply()

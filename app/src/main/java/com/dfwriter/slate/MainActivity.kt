@@ -1121,6 +1121,12 @@ class MainActivity : Activity() {
             "clears E Ink ghosting"
         ),
         SettingsSheet.Row(
+            "Paged buffer",
+            { onOff(prefs.pagedBuffer) },
+            { prefs.pagedBuffer = !prefs.pagedBuffer; editor.restyleNow() },
+            "experimental — bounds typing cost"
+        ),
+        SettingsSheet.Row(
             "Auto-divide",
             { if (prefs.autoDivideWords <= 0) "off" else "${prefs.autoDivideWords} words" },
             { d -> prefs.autoDivideWords = (prefs.autoDivideWords + d * 1_000).coerceIn(0, 100_000) },
