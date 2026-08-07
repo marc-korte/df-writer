@@ -524,32 +524,41 @@ class MainActivity : Activity() {
      * no crash protection at all. The draft is not discarded to make room: it
      * becomes an ordinary file beside the others, where it can be read and
      * merged or deleted. Text kept twice can be seen; text dropped cannot.
+     *
+     * False means the draft could not be secured and nothing was released:
+     * the caller must not go through with the switch, or the session ends up
+     * in the very state parking exists to prevent — the draft unreachable and
+     * the next document unprotected.
      */
-    private fun parkRecoveryDraft(target: File?) {
-        if (!recoveryPending) return
+    private fun parkRecoveryDraft(target: File?): Boolean {
+        if (!recoveryPending) return true
         // Reopening the very document the offer belongs to changes nothing.
-        if (target != null && target.absolutePath == store.current?.absolutePath) return
+        if (target != null && target.absolutePath == store.current?.absolutePath) return true
         val draft = store.readScratch()
         if (draft.isNullOrBlank()) {
             recoveryPending = false
             store.preserveScratch = false
             store.clearScratch()
-            return
+            return true
         }
         val stem = store.scratchOwner()?.let { File(it).nameWithoutExtension } ?: "untitled"
         val kept = store.newFile(store.libraryRoot(), "$stem recovered")
         // preserveScratch still stands here, so this write cannot touch the
         // slot it is rescuing. Only a parked draft releases the slot; a card
         // that refuses the write leaves everything as it was, still preserved.
-        if (!store.writeThrough(kept, draft)) return
+        if (!store.writeThrough(kept, draft)) return false
         recoveryPending = false
         store.preserveScratch = false
         store.clearScratch()
         flash("Recovered text kept as ${kept.name}")
+        return true
     }
 
     private fun loadInto(f: File) {
-        parkRecoveryDraft(f)
+        if (!parkRecoveryDraft(f)) {
+            flash("Not opened — the recovered draft could not be kept safe")
+            return
+        }
         // The document being left keeps its place, so coming back to it — the
         // next chapter over, or tomorrow — lands on the sentence being worked
         // on rather than the top of the page.
@@ -586,7 +595,10 @@ class MainActivity : Activity() {
     }
 
     private fun newDocument() {
-        parkRecoveryDraft(null)
+        if (!parkRecoveryDraft(null)) {
+            flash("No new document — the recovered draft could not be kept safe")
+            return
+        }
         store.current?.let { prefs.rememberCaret(it.absolutePath, editor.selectionStart) }
         val f = store.createAndOpen(store.libraryRoot())
         editor.setText("")
@@ -1621,9 +1633,16 @@ class MainActivity : Activity() {
         sheet.onFreeText = { answer ->
             closeSheets()
             if (answer.equals("DELETE", ignoreCase = true)) {
-                val ok = store.delete()
-                if (ok) { editor.setText(""); newDocument() }
-                flash(if (ok) "Deleted $name" else "Delete failed")
+                // An unanswered recovery draft is not this deletion's to take:
+                // it is parked as a file first, and a card that cannot hold it
+                // stops the deletion rather than orphaning the draft.
+                if (!parkRecoveryDraft(null)) {
+                    flash("Not deleted — the recovered draft could not be kept safe")
+                } else {
+                    val ok = store.delete()
+                    if (ok) { editor.setText(""); newDocument() }
+                    flash(if (ok) "Deleted $name" else "Delete failed")
+                }
             } else flash("Not deleted")
         }
         sheet.show()

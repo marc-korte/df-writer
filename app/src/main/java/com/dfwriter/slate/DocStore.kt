@@ -313,8 +313,11 @@ class DocStore(private val ctx: Context, private val prefs: Prefs) {
             val gone = f.delete()
             if (gone) {
                 // A document made later in the same minute can be handed the
-                // same name, so the dead one's draft must not outlive it.
-                if (scratchOwner() == f.absolutePath) clearScratch()
+                // same name, so the dead one's draft must not outlive it —
+                // unless that draft is an unanswered recovery offer, which is
+                // not this deletion's to decide. The caller parks it first;
+                // this guard is the backstop for any path that did not.
+                if (!preserveScratch && scratchOwner() == f.absolutePath) clearScratch()
                 current = null
                 identityChanged()
             }

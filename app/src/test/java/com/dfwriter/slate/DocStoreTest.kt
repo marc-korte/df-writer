@@ -208,6 +208,23 @@ class DocStoreTest {
             prefs.lastFile.ifEmpty { null })
     }
 
+    @Test
+    fun `deleting the owner leaves a preserved draft alone`() {
+        // While a recovery offer stands unanswered, the shadow copy is the only
+        // place that draft exists — deleting the document it belongs to must
+        // not take the undecided draft with it.
+        val f = store.createAndOpen(lib, "doomed")!!
+        store.writeScratchFor(f.absolutePath, "the words the offer holds")
+        store.preserveScratch = true
+        try {
+            assertTrue(store.delete())
+            assertEquals("the words the offer holds", store.readScratch())
+            assertEquals(f.absolutePath, store.scratchOwner())
+        } finally {
+            store.preserveScratch = false
+        }
+    }
+
     // ------------------------------------------------------------ browsing
 
     @Test
