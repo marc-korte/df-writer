@@ -1333,16 +1333,27 @@ class MainActivity : Activity() {
      * ahead of it. A document that stands alone is taken from the buffer as it
      * always was.
      */
-    private fun exportSource(): Pair<String, String> {
+    /**
+     * What to export and what to call it: the whole book where the open file is
+     * one part of one, and the buffer itself otherwise.
+     *
+     * The parts are read back from the card, so the card has to hold what is on
+     * screen. A save that fails is the end of it — exporting anyway would write
+     * out an old draft under a name that says otherwise.
+     */
+    private fun exportSource(): Pair<String, String>? {
         val f = store.current
         val folder = f?.let { Manuscript.folderOf(it) }
             ?: return editor.text.toString() to (f?.nameWithoutExtension ?: "document")
-        if (store.dirty) saveQuietly()
+        if (store.dirty && !saveQuietly()) {
+            flash("Not exported — the book could not be saved first")
+            return null
+        }
         return Manuscript.compile(folder) to folder.name
     }
 
     private fun exportHtml() {
-        val (body, name) = exportSource()
+        val (body, name) = exportSource() ?: return
         val out = File(exportDir(), "$name.html")
         runCatching {
             out.parentFile?.mkdirs()
@@ -1354,7 +1365,7 @@ class MainActivity : Activity() {
     private fun exportPdf() {
         // A second run would be drawing into the same file as the first.
         if (exporting) { flash("Still building the last PDF…"); return }
-        val (body, name) = exportSource()
+        val (body, name) = exportSource() ?: return
         val out = File(exportDir(), "$name.pdf")
         // Pictures are named relative to the part they sit in, which is inside
         // the manuscript folder rather than beside it.

@@ -247,11 +247,117 @@ class ManuscriptTest {
 
     @Test
     fun `a part divided twice still sorts correctly`() {
-        val names = listOf("01 a.md", "02 b.md", "02-2 c.md", "02-2-2 d.md", "03 e.md")
+        val names = listOf("01 a.md", "02 b.md", "02-02 c.md", "02-02-02 d.md", "03 e.md")
         assertEquals(
             "sub-numbered parts must sort between their neighbours",
             names, names.sorted()
         )
+    }
+
+    @Test
+    fun `the tenth piece of a part comes after the second`() {
+        val dir = tempDir()
+        val source = File(dir, "Book.md")
+        source.writeText(book(60_000))
+        val folder = Manuscript.write(source, Manuscript.plan(source.readText(), 25_000)!!)!!
+
+        // Divided small enough to make more than nine pieces, which is where
+        // plain alphabetical ordering of unpadded numbers goes wrong.
+        val grown = Manuscript.chapters(folder).first()
+        val longer = grown.readText()
+        val pieces = Manuscript.divideInPlace(grown, Manuscript.plan(longer, 2_000)!!)!!
+        assertTrue("this test needs at least ten pieces, got ${pieces.size}", pieces.size >= 10)
+
+        assertEquals(
+            "the pieces must come back in the order they were written",
+            longer, pieces.joinToString("") { it.readText() }
+        )
+        val names = Manuscript.chapters(folder).map { it.name }
+        assertEquals(
+            "reading order must survive a plain alphabetical sort, for the " +
+                    "device's own file browser",
+            names, names.sorted()
+        )
+        assertEquals(
+            "the whole book must still read back in order",
+            DocStore.countWords(source.parentFile!!.let { File(it, "Book.md.bak") }.readText()),
+            DocStore.countWords(Manuscript.compile(folder))
+        )
+    }
+
+    @Test
+    fun `a number written without padding still reads in order`() {
+        // What an older version left behind, and what a writer might type.
+        val dir = tempDir()
+        listOf("01 one.md", "02 two.md", "02-2 a.md", "02-10 b.md", "03 three.md")
+            .forEach { File(dir, it).writeText("x") }
+        assertEquals(
+            listOf("01 one.md", "02 two.md", "02-2 a.md", "02-10 b.md", "03 three.md"),
+            Manuscript.chapters(dir).map { it.name }
+        )
+    }
+
+    @Test
+    fun `a folder that already holds something is left alone`() {
+        val dir = tempDir()
+        val source = File(dir, "Book.md")
+        val text = book(60_000)
+        source.writeText(text)
+        // Notes that happen to share the document's name.
+        File(dir, "Book").mkdirs()
+        File(dir, "Book/thoughts.md").writeText("an unrelated note")
+
+        assertNull(
+            "a folder with someone else's files in it must not be used",
+            Manuscript.write(source, Manuscript.plan(text, 25_000)!!)
+        )
+        assertEquals("the document must be untouched", text, source.readText())
+        assertEquals(
+            "and so must the note",
+            "an unrelated note", File(dir, "Book/thoughts.md").readText()
+        )
+    }
+
+    // ------------------------------------------------- when the card says no
+
+    @Test
+    fun `a division that cannot be written leaves the part whole`() {
+        val dir = tempDir()
+        val source = File(dir, "Book.md")
+        source.writeText(book(60_000))
+        val folder = Manuscript.write(source, Manuscript.plan(source.readText(), 25_000)!!)!!
+
+        val grown = Manuscript.chapters(folder).last()
+        val longer = grown.readText() + book(40_000)
+        grown.writeText(longer)
+        val before = Manuscript.chapters(folder).map { it.name }
+
+        // A card with nothing left on it: nothing new can be created.
+        org.junit.Assume.assumeTrue(
+            "this test needs a folder that can be made read-only",
+            folder.setWritable(false) &&
+                    !runCatching { File(folder, "probe.tmp").createNewFile() }.getOrDefault(false)
+        )
+        try {
+            assertNull(
+                "a division that cannot be written must not report success",
+                Manuscript.divideInPlace(grown, Manuscript.plan(longer, 25_000)!!)
+            )
+            assertEquals(
+                "the part must still hold every word it held",
+                longer, grown.readText()
+            )
+            assertEquals(
+                "and nothing may be left behind",
+                before, Manuscript.chapters(folder).map { it.name }
+            )
+            assertTrue(
+                "not even a half-written temporary",
+                (folder.list() ?: emptyArray()).none { it.startsWith(".") }
+            )
+        } finally {
+            folder.setWritable(true)
+        }
     }
 
     @Test

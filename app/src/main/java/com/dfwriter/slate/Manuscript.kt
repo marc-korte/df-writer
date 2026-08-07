@@ -160,6 +160,11 @@ object Manuscript {
     fun write(source: File, plan: Plan): File? {
         val folder = File(source.parentFile, source.nameWithoutExtension)
         if (folder.exists() && !folder.isDirectory) return null
+        // A folder that already holds something belongs to someone else, and
+        // whatever is in it would be read back as chapters of this book. An
+        // unreadable folder counts as occupied: better to leave the document
+        // whole than to divide it into a place that cannot be checked.
+        if (folder.isDirectory && folder.list()?.isEmpty() != true) return null
 
         val written = ArrayList<File>()
         val ok = runCatching {
@@ -194,7 +199,40 @@ object Manuscript {
     fun chapters(folder: File): List<File> =
         (folder.listFiles() ?: emptyArray())
             .filter { it.isFile && it.name.lowercase().endsWith(".md") }
-            .sortedBy { it.name.lowercase() }
+            .sortedWith(READING_ORDER)
+
+    /**
+     * Reading order. The names are written so that a plain alphabetical sort
+     * gives this same answer — that is what makes the Supernote's own file
+     * browser show a book in order — but the numbers are compared as numbers
+     * here so that a name written by an older version, or by hand, still lands
+     * where it belongs rather than putting part 10 ahead of part 2.
+     */
+    private val READING_ORDER = Comparator<File> { a, b ->
+        val x = numbersOf(a.name)
+        val y = numbersOf(b.name)
+        val byName = a.name.lowercase().compareTo(b.name.lowercase())
+        when {
+            // Anything unnumbered is not part of the sequence; it keeps to the
+            // end rather than cutting into the middle of the book.
+            x.isEmpty() || y.isEmpty() ->
+                if (x.isEmpty() == y.isEmpty()) byName else if (x.isEmpty()) 1 else -1
+            else -> {
+                var c = 0
+                for (i in 0 until minOf(x.size, y.size)) {
+                    c = x[i].compareTo(y[i])
+                    if (c != 0) break
+                }
+                // A part sorts before the pieces it was divided into: 04, 04-2.
+                if (c == 0) c = x.size.compareTo(y.size)
+                if (c == 0) byName else c
+            }
+        }
+    }
+
+    /** A part's number read as numbers: "04-2" is fourth, then second within it. */
+    private fun numbersOf(name: String): List<Int> =
+        numberOf(name)?.split('-')?.mapNotNull { it.toIntOrNull() } ?: emptyList()
 
     /**
      * True when [folder] holds a divided manuscript rather than a plain folder
@@ -226,6 +264,12 @@ object Manuscript {
      * The new pieces are written before the original is shortened, so an
      * interruption leaves the tail of the part twice over rather than not at
      * all. Duplicated text can be seen and deleted; lost text cannot.
+     *
+     * Nothing is written into a file that already holds text. Every write goes
+     * to a temporary file first and is renamed into place, so a card that fills
+     * up or a battery that goes cannot catch a chapter half-written — least of
+     * all [part] itself, which still holds the whole of what it held if the
+     * shortening does not go through.
      */
     fun divideInPlace(part: File, plan: Plan): List<File>? {
         val folder = part.parentFile ?: return null
@@ -233,27 +277,51 @@ object Manuscript {
         if (plan.parts.size < 2) return null
 
         val added = ArrayList<File>()
-        for (i in 1 until plan.parts.size) {
-            val piece = plan.parts[i]
-            val stem = DocStore.slug(piece.title).take(48).ifEmpty { "part" }
-            val f = File(folder, "$number-${i + 1} $stem.md")
-            val ok = !f.exists() &&
-                    runCatching { f.writeText(piece.body, Charsets.UTF_8); true }.getOrDefault(false)
-            if (!ok) {
-                added.forEach { runCatching { it.delete() } }
-                return null
-            }
-            added.add(f)
-        }
-
-        val shortened = runCatching {
-            part.writeText(plan.parts[0].body, Charsets.UTF_8); true
-        }.getOrDefault(false)
-        if (!shortened) {
+        fun backOut(): List<File>? {
             added.forEach { runCatching { it.delete() } }
             return null
         }
+
+        for (i in 1 until plan.parts.size) {
+            val piece = plan.parts[i]
+            val stem = DocStore.slug(piece.title).take(48).ifEmpty { "part" }
+            // Padded, so that the tenth piece still sorts after the second.
+            val f = File(folder, "%s-%02d %s.md".format(number, i + 1, stem))
+            if (f.exists()) return backOut()
+            // Counted as ours before the write, so that a write which fails
+            // partway cannot leave a piece of a chapter behind under a name
+            // the book would read back as one.
+            added.add(f)
+            if (!replace(f, piece.body)) return backOut()
+        }
+
+        if (!replace(part, plan.parts[0].body)) return backOut()
         return listOf(part) + added
+    }
+
+    /**
+     * Puts [text] in [target], or leaves [target] exactly as it was.
+     *
+     * Writing straight to a file empties it first, and a write that fails after
+     * that point has destroyed what was there. The bytes go to a temporary file
+     * beside the target instead, and only a completed one is renamed over it.
+     */
+    private fun replace(target: File, text: String): Boolean {
+        // Hidden, and not a .md file, so a temporary left by a failure is never
+        // read back as a chapter.
+        val tmp = File(target.parentFile, ".${target.name}.part")
+        runCatching { tmp.delete() }
+        val wrote = runCatching { tmp.writeText(text, Charsets.UTF_8); true }.getOrDefault(false)
+        if (!wrote) {
+            runCatching { tmp.delete() }
+            return false
+        }
+        if (runCatching { tmp.renameTo(target) }.getOrDefault(false)) return true
+        // The rename is what makes this safe; if it will not go through, the
+        // target is left alone rather than deleted to make room for a second
+        // attempt that might fail just as well.
+        runCatching { tmp.delete() }
+        return false
     }
 
     /** Every chapter joined back into one piece, for export. */

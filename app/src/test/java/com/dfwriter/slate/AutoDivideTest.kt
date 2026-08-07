@@ -243,6 +243,60 @@ class AutoDivideTest {
     }
 
     @Test
+    fun `nothing is exported from parts that could not be brought up to date`() {
+        val a = start()
+        tick()
+        val folder = File(lib, "novel")
+        assertTrue("this test needs a divided piece", Manuscript.chapters(folder).size >= 2)
+
+        // A card that will not take the save: the parts on it are now older
+        // than what is on screen.
+        org.junit.Assume.assumeTrue(
+            "this test needs a folder that can be made read-only",
+            folder.setWritable(false) &&
+                    !runCatching { File(folder, "probe.tmp").createNewFile() }.getOrDefault(false)
+        )
+        try {
+            val editor = editorOf(a)
+            editor.text.insert(0, "A line the card will never hold.\n\n")
+            shadowOf(Looper.getMainLooper()).idle()
+
+            a.dispatchKeyEvent(
+                android.view.KeyEvent(
+                    0, 0, android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_M, 0,
+                    android.view.KeyEvent.META_CTRL_ON or android.view.KeyEvent.META_CTRL_LEFT_ON or
+                            android.view.KeyEvent.META_SHIFT_ON or android.view.KeyEvent.META_SHIFT_LEFT_ON
+                )
+            )
+            shadowOf(Looper.getMainLooper()).idle()
+
+            assertFalse(
+                "an export written from stale parts would be missing the newest work",
+                File(File(lib, "Exports"), "novel.html").isFile
+            )
+        } finally {
+            folder.setWritable(true)
+        }
+
+        // The same keystroke, once the card will take the save: this is what
+        // says the export was stopped by the failure and not by the test.
+        a.dispatchKeyEvent(
+            android.view.KeyEvent(
+                0, 0, android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_M, 0,
+                android.view.KeyEvent.META_CTRL_ON or android.view.KeyEvent.META_CTRL_LEFT_ON or
+                        android.view.KeyEvent.META_SHIFT_ON or android.view.KeyEvent.META_SHIFT_LEFT_ON
+            )
+        )
+        shadowOf(Looper.getMainLooper()).idle()
+        val html = File(File(lib, "Exports"), "novel.html")
+        assertTrue("the export should go through once the save can", html.isFile)
+        assertTrue(
+            "and it should hold the line that could not be saved before",
+            html.readText().contains("A line the card will never hold")
+        )
+    }
+
+    @Test
     fun `a short document is left as one file`() {
         doc.writeText(novel(2_000))
         val a = start()
