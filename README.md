@@ -91,15 +91,16 @@ your eyes, two keystrokes fix it permanently.
   being worked on rather than the top of the page. The threshold is a setting,
   and so is whether it happens at all, for a library synced somewhere that
   expects one file to stay one file.
-- **Built for long pieces, not just notes.** The editor holds spans only for a
-  window around the page rather than for the whole buffer, because every span
-  operation on a buffer gets slower as its span count grows — which is what
-  makes a naive Markdown editor bog down on a manuscript. Opening a document and
-  toggling a mode cost the same on a hundred thousand words as on ten thousand,
-  and an edit costs the edit rather than the document. The window widens as you
-  scroll, just after the scroll rather than during it, and is rebuilt only on a
-  jump. There is a benchmark in the test suite that fails if any of that stops
-  being true.
+- **Built for long pieces, not just notes.** The editor's text view holds only
+  a page of the document around the caret — generous behind it, a short tail
+  ahead of it — and the page moves with you: when typing wears the tail down,
+  when a scroll or a jump leaves it, when undo reaches back past it. The tail
+  is the whole of what a keystroke costs on this device, so typing costs the
+  same in a hundred-thousand-word file as in a note, at the top of the file as
+  at the end. Page seams fall on blank lines outside code fences, the styling
+  knows when a page opens mid-fence, and a save verifies the page against the
+  document before anything reaches the card. Spans are windowed the same way,
+  and a benchmark in the test suite fails if any of this stops being true.
 - **Zero third-party dependencies.** No AndroidX, no Compose, no Play Services.
   Framework views start faster and repaint more predictably, and the APK is
   683 KB.
