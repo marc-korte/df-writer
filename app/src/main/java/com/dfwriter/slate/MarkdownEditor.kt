@@ -493,7 +493,17 @@ class MarkdownEditor @JvmOverloads constructor(
         applySoftInputPolicy()
         requestLayout()
         layoutColumn()
-        restyleNow()
+        // Coalesced: a rotation lands here through onConfigurationChanged AND
+        // through onSizeChanged -> layoutColumn, and each full restyle drags a
+        // full relayout of the buffer behind it. One is enough.
+        scheduleFullRestyle()
+    }
+
+    private val fullRestyle = Runnable { if (isAttachedToWindow) restyleNow() }
+
+    private fun scheduleFullRestyle() {
+        handler.removeCallbacks(fullRestyle)
+        handler.post(fullRestyle)
     }
 
     /**
@@ -526,8 +536,10 @@ class MarkdownEditor @JvmOverloads constructor(
         val column = (w - side * 2).coerceAtLeast(0)
         if (column != styler.contentWidthPx) {
             styler.contentWidthPx = column
-            // Posted: restyling from inside a layout pass would re-enter layout.
-            post { if (isAttachedToWindow) restyleNow() }
+            // Posted: restyling from inside a layout pass would re-enter
+            // layout — and coalesced with applyMetrics' own pass, since a
+            // rotation arrives through both doors.
+            scheduleFullRestyle()
         }
     }
 
@@ -720,6 +732,7 @@ class MarkdownEditor @JvmOverloads constructor(
         handler.removeCallbacks(extendWindow)
         handler.removeCallbacks(settleDone)
         handler.removeCallbacks(clearArrival)
+        handler.removeCallbacks(fullRestyle)
         pendingRestyle?.let { handler.removeCallbacks(it) }
         viewTreeObserver.removeOnGlobalLayoutListener(settleOnLayout)
         super.onDetachedFromWindow()

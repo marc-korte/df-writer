@@ -1571,11 +1571,14 @@ class MainActivity : Activity() {
 
     // --------------------------------------------------------------- status
 
+    private var shownStatusLeft = ""
+    private var shownStatusRight = ""
+
     private fun updateStatus() {
         if (!prefs.showStatusBar && statusMessage == null) return
         val name = store.current?.name ?: "untitled"
         val dot = if (store.dirty) " •" else ""
-        statusLeft.text = statusMessage ?: "☰  $name$dot"
+        val left = statusMessage ?: "☰  $name$dot"
 
         val words = wordCount()
         val modes = buildString {
@@ -1583,10 +1586,22 @@ class MainActivity : Activity() {
             if (prefs.typewriterMode) append("typewriter ")
             if (prefs.sourceMode) append("source ")
         }.trim()
-        statusRight.text = buildString {
+        val right = buildString {
             if (modes.isNotEmpty()) append(modes).append("  ·  ")
             append("$words words  ·  ${readingTime(words)}")
             append("  ·  ${Math.round(Scale.ui * 100)}%")
+        }
+
+        // setText relayouts and repaints whether or not anything changed, and
+        // this runs on every keystroke: unchanged text must not cost the
+        // panel two dirty regions per character during a typing burst.
+        if (left != shownStatusLeft) {
+            shownStatusLeft = left
+            statusLeft.text = left
+        }
+        if (right != shownStatusRight) {
+            shownStatusRight = right
+            statusRight.text = right
         }
     }
 
