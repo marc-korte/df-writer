@@ -67,6 +67,15 @@ class MarkdownEditor @JvmOverloads constructor(
     private var splicing = false
     private var inSetText = false
 
+    /**
+     * Whether the page is genuinely a slice of a larger document. Tracked as
+     * intent — set by the splice, cleared by a whole-document setText — so
+     * the mirror's repair logic never keys on the PREFERENCE: the setting
+     * can be flipped off while the page is still a slice, and treating that
+     * page as the whole document would truncate the book on the next save.
+     */
+    private var pageIsSlice = false
+
     /** Called when a save found the mirror and the page disagreeing. */
     var onMirrorRepair: (() -> Unit)? = null
 
@@ -101,18 +110,19 @@ class MarkdownEditor @JvmOverloads constructor(
         val e = text
         if (e != null) {
             val len = e.length
-            // The page vouches for its slice. Unpaged, the slice is the whole
-            // document and the invariant is total; paged, text beyond the
-            // page answers to the mirror alone.
+            // The page vouches for its slice. When it IS the document the
+            // invariant is total; when it is a slice — by its own record,
+            // never by the preference — text beyond it answers to the mirror
+            // alone, whatever the setting says today.
             var same = (pageEnd - pageStart) == len && pageEnd <= docText.length &&
-                    (pagedEnabled() || (pageStart == 0 && pageEnd == docText.length))
+                    (pageIsSlice || (pageStart == 0 && pageEnd == docText.length))
             if (same) {
                 for (i in 0 until len) {
                     if (e[i] != docText[pageStart + i]) { same = false; break }
                 }
             }
             if (!same) {
-                if (pagedEnabled() && pageStart >= 0 && pageStart <= docText.length) {
+                if (pageIsSlice && pageStart >= 0 && pageStart <= docText.length) {
                     docText.replace(pageStart, pageEnd.coerceIn(pageStart, docText.length), e.toString())
                     pageEnd = pageStart + len
                 } else {
@@ -132,6 +142,41 @@ class MarkdownEditor @JvmOverloads constructor(
 
     /** For tests: the page's document bounds. */
     internal fun pageBounds(): Pair<Int, Int> = pageStart to pageEnd
+
+    /**
+     * The paged-buffer setting changed. Turning it off while the page is a
+     * slice must put the whole document back into the Editable — silently
+     * keeping the slice would leave the writer editing one page of a book
+     * the setting claims is whole. Turning it on just lets the next check
+     * narrow the page in its own time.
+     */
+    fun onPagedPreferenceChanged() {
+        if (::prefs.isInitialized && prefs.pagedBuffer) {
+            schedulePageCheck()
+            return
+        }
+        if (!pageIsSlice) return
+        val caretG = globalSelectionStart()
+        splicing = true
+        styling = true
+        try {
+            pageStart = 0
+            pageEnd = docText.length
+            pageIsSlice = false
+            styler.baseFenceParity = false
+            styler.fencesChangedAt(0)
+            setText(docText.toString())
+            winStart = 0
+            winEnd = 0
+            val e = text ?: return
+            setSelection(caretG.coerceIn(0, e.length))
+            rememberCaretLine()
+        } finally {
+            styling = false
+            splicing = false
+        }
+        restyleNow()
+    }
 
     // -------------------------------------------------------------- splice
 
@@ -176,6 +221,7 @@ class MarkdownEditor @JvmOverloads constructor(
         try {
             pageStart = from
             pageEnd = to
+            pageIsSlice = from > 0 || to < doc.length
             styler.baseFenceParity = fenceParityAt(doc, from)
             styler.fencesChangedAt(0)
             setText(doc.substring(from, to))   // splicing=true: no reset, no mirror
@@ -290,6 +336,10 @@ class MarkdownEditor @JvmOverloads constructor(
             docText.append(text ?: "")
             pageStart = 0
             pageEnd = docText.length
+            pageIsSlice = false
+            // A whole document starts outside any fence; a stale parity from
+            // a previous page would style everything inverted.
+            if (::styler.isInitialized) styler.baseFenceParity = false
             inSetText = true
             try {
                 super.setText(text, type)
@@ -720,9 +770,12 @@ class MarkdownEditor @JvmOverloads constructor(
             from.clear(); to.clear()
             return false
         }
-        // A change bigger than a page — a replace-all, a restored draft —
-        // applies to the document directly, and the page resets around it.
-        if (old.length > PAGE_BEFORE + PAGE_AFTER) {
+        // A change bigger than the page's TAIL — the room a splice leaves
+        // after the caret — applies to the document directly, and the page
+        // resets around it. Judged against the tail, not the whole page: a
+        // mid-sized change would pass the whole-page test, fail the local
+        // bounds after the splice, and wipe both stacks.
+        if (old.length > PAGE_AFTER) {
             from.removeAt(from.size - 1)
             applyingHistory = true
             try {

@@ -137,9 +137,66 @@ class SpliceTest {
     }
 
     @Test
+    fun `undo reaches a mid-sized change bigger than the page tail`() {
+        // Between the tail budget and the whole page budget: too big to fit
+        // behind the caret after a splice, small enough that the old code
+        // routed it through the splice path anyway — and wiped both stacks.
+        val text = book(20_000)
+        val e = pagedEditor(text)
+        val at = text.indexOf("## Chapter 3")
+        e.setSelectionGlobal(at)
+        e.text.insert(
+            e.selectionStart,
+            // Paragraph-shaped, so a page cut can legally land inside it —
+            // one unbroken run would just stretch the page around itself.
+            ("x".repeat(60) + "\n\n").repeat(80)
+        )
+        e.jumpTo(text.length - 100)
+        assertTrue("undo must survive a mid-sized change", e.undo())
+        assertEquals("and put the document back", text, e.documentText())
+    }
+
+    @Test
+    fun `turning paging off restores the whole document to the page`() {
+        val text = book(20_000)
+        val e = pagedEditor(text)
+        e.setSelectionGlobal(text.length / 2)
+        assertTrue("this test needs a real slice", e.pageBounds().first > 0)
+        val caretG = e.globalSelectionStart()
+
+        Prefs(RuntimeEnvironment.getApplication()).pagedBuffer = false
+        e.onPagedPreferenceChanged()
+
+        assertEquals("the page must be the whole document again",
+            0 to text.length, e.pageBounds())
+        assertEquals("the Editable must hold all of it", text, e.text.toString())
+        assertEquals("the caret must not move", caretG, e.globalSelectionStart())
+        assertEquals("and the document must be intact", text, e.documentText())
+    }
+
+    @Test
+    fun `a save with paging freshly off must not truncate the document`() {
+        // The setting can be flipped while the page is still a slice — the
+        // repair logic must key on the page's geometry, not the preference,
+        // or the next save writes one page over the whole book.
+        val text = book(20_000)
+        val e = pagedEditor(text)
+        e.setSelectionGlobal(text.length / 2)
+        assertTrue(e.pageBounds().first > 0)
+        Prefs(RuntimeEnvironment.getApplication()).pagedBuffer = false
+        assertEquals("documentText must survive the stale slice", text, e.documentText())
+    }
+
+    @Test
     fun `the paged mirror survives a storm of jumps and edits`() {
         val text = book(20_000)
         val e = pagedEditor(text)
+        // The reference exists only to bound the random positions; the
+        // invariant under test is page-vs-mirror, read RAW — the repairing
+        // snapshot would paper over exactly the drift this hunts. Any repair
+        // firing at all is a failure.
+        var repaired = false
+        e.onMirrorRepair = { repaired = true }
         val reference = StringBuilder(text)
         val rnd = Random(1234)
         repeat(250) { step ->
@@ -149,32 +206,26 @@ class SpliceTest {
                     val g = rnd.nextInt(reference.length)
                     e.setSelectionGlobal(g)
                     e.text.insert(e.selectionStart, "x")
-                    reference.insert(e.globalSelectionStart() - 1, "x")
                 }
                 2 -> {
                     val g = rnd.nextInt(reference.length - 2)
                     e.setSelectionGlobal(g)
                     val local = e.selectionStart
-                    if (local < e.text.length) {
-                        e.text.delete(local, local + 1)
-                        reference.delete(g, g + 1)
-                    }
+                    if (local < e.text.length) e.text.delete(local, local + 1)
                 }
                 3 -> if (rnd.nextBoolean()) e.undo() else e.redo()
             }
             if (rnd.nextInt(3) != 0) return@repeat
-            // Undo/redo make the reference stale; resync from the editor's
-            // verified snapshot and keep fuzzing — the invariant under test
-            // is page-vs-mirror, which documentText() checks and repairs
-            // loudly. A repair would double the text length and fail below.
-            val doc = e.documentText()
+            val raw = e.documentTextRaw()
             assertEquals(
                 "page and mirror must agree at step $step",
                 e.text.toString(),
-                doc.substring(e.pageBounds().first, e.pageBounds().second)
+                raw.substring(e.pageBounds().first, e.pageBounds().second)
             )
             reference.setLength(0)
-            reference.append(doc)
+            reference.append(raw)
         }
+        e.documentText()
+        assertTrue("no mirror repair may ever fire", !repaired)
     }
 }

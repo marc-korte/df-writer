@@ -356,6 +356,13 @@ class ShortcutTest {
 
         val at = body().indexOf("## Chapter 20")
         assertEquals("the caret should sit at the heading", at, editor.selectionStart)
+        // Under the paged buffer body() is the page, so the assert above is
+        // page-local by construction; this one pins the global mapping too.
+        assertEquals(
+            "the global caret must sit at the heading's document offset",
+            editor.documentText().indexOf("## Chapter 20"),
+            editor.globalSelectionStart()
+        )
         assertTrue(
             "the editor must hold focus again, or the caret is invisible",
             editor.isFocused

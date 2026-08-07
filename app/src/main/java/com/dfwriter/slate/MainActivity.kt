@@ -1123,8 +1123,8 @@ class MainActivity : Activity() {
         SettingsSheet.Row(
             "Paged buffer",
             { onOff(prefs.pagedBuffer) },
-            { prefs.pagedBuffer = !prefs.pagedBuffer; editor.restyleNow() },
-            "experimental — bounds typing cost"
+            { prefs.pagedBuffer = !prefs.pagedBuffer; editor.onPagedPreferenceChanged() },
+            "off = the classic whole-file buffer"
         ),
         SettingsSheet.Row(
             "Auto-divide",
