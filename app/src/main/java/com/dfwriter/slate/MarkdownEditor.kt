@@ -831,12 +831,11 @@ class MarkdownEditor @JvmOverloads constructor(
             scrollX + Scale.mm(1.2f), bottom - (bottom - top) * 0.25f,
             caretPaint
         )
-        // A millimetre wide at rest: at 300 PPI a hairline caret disappears
-        // into the text, and with no blink there is nothing else to catch the
-        // eye — arrow-key editing is blind without a bar that can be seen.
-        // Thicker still for a few seconds after a jump.
-        val pt = if (System.currentTimeMillis() < caretBoostUntil) 5f else 3f
-        val w = max(4f, Scale.pt(pt))
+        // Two points — visible without being a fence post. The first visible
+        // build wore three and Marc called it too thick; a hairline was the
+        // other failure. Thicker still for a few seconds after a jump.
+        val pt = if (System.currentTimeMillis() < caretBoostUntil) 3.5f else 2f
+        val w = max(3f, Scale.pt(pt))
         val inset = (bottom - top) * 0.10f
         canvas.drawRect(x, top + inset, x + w, bottom - inset, caretPaint)
     }
