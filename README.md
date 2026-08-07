@@ -74,6 +74,17 @@ your eyes, two keystrokes fix it permanently.
 - **Not keyboard-only.** Tapping the status bar opens the command palette and
   tapping outside a panel closes it, so everything is reachable when the
   keyboard is not paired — which is exactly when you need it most.
+- **A long piece looks after itself.** Android re-measures the whole text
+  buffer on every change, so one enormous file gets slower to open and to type
+  in the longer it grows — six seconds to open a hundred thousand words, on the
+  device. A document that passes about twenty-five thousand words is therefore
+  divided into parts in a folder of its own, without being asked, and you carry
+  on in the part you were in with the caret where you left it. The cut falls on
+  a blank line and on a chapter heading wherever the book allows one, never
+  inside a paragraph; a piece with nowhere safe to cut is left whole. The
+  original is kept beside the folder as a `.bak`, so nothing here can lose a
+  manuscript. The contents drawer and the word count then span every part, so it
+  still reads as one book.
 - **Built for long pieces, not just notes.** The editor holds spans only for a
   window around the page rather than for the whole buffer, because every span
   operation on a buffer gets slower as its span count grows — which is what

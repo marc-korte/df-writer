@@ -53,6 +53,8 @@ class MainActivity : Activity() {
     private var chromeBodyPt = 0f
     private var recoveryPending = false
     private var cachedWords = 0
+    private var othersWords = 0
+    private var dividing = false
     private var exporting = false
 
     /**
@@ -75,6 +77,7 @@ class MainActivity : Activity() {
     private val autosave = object : Runnable {
         override fun run() {
             if (store.dirty) saveInBackground()
+            divideIfTooLong()
             ui.postDelayed(this, 4000)
         }
     }
@@ -512,8 +515,11 @@ class MainActivity : Activity() {
         ImageCache.retryBroken()
         editor.setText(body)
         editor.restyleNow()
-        editor.setSelection(0)
+        // Focus first, then place the caret. Taking focus moves the caret to
+        // the end of the buffer on the device — Robolectric stubs focus, so a
+        // test will not show it — and a document should open at its beginning.
         editor.requestFocus()
+        editor.setSelection(0)
         editor.clearHistory()
         editsSinceRefresh = 0
         // setText runs the change listener, which flags the document dirty even
@@ -523,6 +529,7 @@ class MainActivity : Activity() {
         // A document just opened gets its count now rather than in a moment.
         ui.removeCallbacks(recountSoon)
         recount()
+        refreshManuscriptWords()
         updateStatus()
     }
 
@@ -610,6 +617,68 @@ class MainActivity : Activity() {
                     updateStatus()
                 }
             }
+        }
+    }
+
+    /**
+     * Divides a document that has grown too long to stay quick, without being
+     * asked and without saying much about it.
+     *
+     * The size is checked against the count already being kept for the status
+     * bar, so this costs nothing on the ticks where nothing needs doing. A
+     * piece with nowhere safe to cut is left alone: see [Manuscript.plan].
+     */
+    private fun divideIfTooLong() {
+        if (dividing) return
+        val f = store.current ?: return
+        if (cachedWords <= Manuscript.TARGET_WORDS) return
+        // Already one part of a longer piece; parts are not divided again.
+        if (Manuscript.folderOf(f) != null) return
+
+        val body = editor.text.toString()
+        val plan = Manuscript.plan(body) ?: return
+
+        dividing = true
+        try {
+            // The file has to match the buffer before it is taken apart.
+            if (!saveQuietly()) return
+            val folder = Manuscript.write(f, plan) ?: return
+
+            // Carry on in the part the caret was in, at the same place in it,
+            // so that dividing a book mid-sentence does not move the writer.
+            val caret = editor.selectionStart
+            var consumed = 0
+            var part = 0
+            for ((i, p) in plan.parts.withIndex()) {
+                if (caret <= consumed + p.body.length) { part = i; break }
+                consumed += p.body.length
+                part = i
+            }
+            val files = Manuscript.chapters(folder)
+            val landing = files.getOrNull(part) ?: files.firstOrNull() ?: return
+            val within = (caret - consumed).coerceAtLeast(0)
+
+            loadInto(landing)
+            editor.setSelection(within.coerceIn(0, editor.text.length))
+            editor.post { editor.centreCaret() }
+            flash("Split into ${plan.parts.size} parts to stay quick")
+        } finally {
+            dividing = false
+        }
+    }
+
+    /**
+     * Every word of the piece the open document belongs to, not just the part
+     * on screen. Read once when a document is opened; the open part's own count
+     * is added live, so the total moves as you write.
+     */
+    private fun refreshManuscriptWords() {
+        val f = store.current
+        val folder = f?.let { Manuscript.folderOf(it) }
+        othersWords = if (folder == null) 0 else {
+            Manuscript.chapters(folder)
+                .filter { it.absolutePath != f.absolutePath }
+                .sumOf { runCatching { DocStore.countWords(store.read(it)) }.getOrDefault(0) }
         }
     }
 
@@ -736,26 +805,75 @@ class MainActivity : Activity() {
         sheet.hide()
         settings.hide()
 
-        val heads = MarkdownStyler.outline(editor.text)
-        val items = heads.map {
-            ListSheet.Item(it.title, "", indent = it.level - 1, payload = it.offset)
+        // A divided piece is still one book, so the drawer lists all of it and
+        // not merely the part that happens to be open. Without that, dividing a
+        // manuscript would scatter it.
+        val here = store.current
+        val folder = here?.let { Manuscript.folderOf(it) }
+        val items = ArrayList<ListSheet.Item>()
+        var headings = 0
+
+        if (folder == null) {
+            for (h in MarkdownStyler.outline(editor.text)) {
+                items.add(ListSheet.Item(h.title, "", indent = h.level - 1, payload = h.offset))
+                headings++
+            }
+        } else {
+            for (chapter in Manuscript.chapters(folder)) {
+                val open = chapter.absolutePath == here.absolutePath
+                // The open part is read from the buffer, which may be ahead of
+                // what is on the card.
+                val text: CharSequence =
+                    if (open) editor.text
+                    else runCatching { store.read(chapter) }.getOrDefault("")
+                val heads = MarkdownStyler.outline(text)
+                items.add(
+                    ListSheet.Item(
+                        chapter.nameWithoutExtension,
+                        if (open) "open" else "${DocStore.countWords(text)} words",
+                        payload = Jump(chapter, 0)
+                    )
+                )
+                for (h in heads) {
+                    items.add(
+                        ListSheet.Item(
+                            h.title, "", indent = h.level, payload = Jump(chapter, h.offset)
+                        )
+                    )
+                    headings++
+                }
+            }
         }
+
         scrim.visibility = View.VISIBLE
         contents.configure(
-            if (heads.isEmpty()) "Contents" else "Contents · ${heads.size}",
+            if (headings == 0) "Contents" else "Contents · $headings",
             "Filter…",
             items,
             "No headings yet. Start a line with # to make one."
         )
         contents.onFreeText = null
         contents.onPick = { item ->
-            (item.payload as? Int)?.let { off ->
-                editor.setSelection(off.coerceIn(0, editor.text.length))
-                editor.post { editor.centreCaret() }
+            when (val p = item.payload) {
+                is Int -> goTo(p)
+                is Jump -> {
+                    if (p.file.absolutePath != store.current?.absolutePath) {
+                        openWithSave(p.file)
+                    }
+                    goTo(p.offset)
+                }
             }
             // Deliberately still open: the next chapter is one more tap away.
         }
         contents.show()
+    }
+
+    /** A place in the piece: which part, and where in it. */
+    private class Jump(val file: File, val offset: Int)
+
+    private fun goTo(offset: Int) {
+        editor.setSelection(offset.coerceIn(0, editor.text.length))
+        editor.post { editor.centreCaret() }
     }
 
     private fun showSettings() {
@@ -1269,7 +1387,7 @@ class MainActivity : Activity() {
      * book per character typed. The number can lag a moment; the sentence being
      * typed cannot.
      */
-    private fun wordCount(): Int = cachedWords
+    private fun wordCount(): Int = cachedWords + othersWords
 
     private fun recount() {
         cachedWords = DocStore.countWords(editor.text)
